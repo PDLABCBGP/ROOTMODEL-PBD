@@ -7,7 +7,6 @@
 //
 // MorphoDynamX is free software, and is licensed under under the terms of the
 // GNU General (GPL) Public License version 2.0, http://www.gnu.org/licenses.
-// beeeeeeeeeeeeeeeh
 
 #ifndef ROOT_HPP
 #define ROOT_HPP
@@ -56,6 +55,7 @@ namespace ROOT
 // pre-definition
 class Root;
 class Remesh;
+class RemeshCell;
 class MechanicalGrowth;
 class SetGlobalAttr;
 class ClearCells;
@@ -82,18 +82,35 @@ public:
 
         // Mass Springs
         addParm("Mass Spring Parameters", "", "");
-        addParm("Wall EK", "Stiffness of the cross springs", "1");
-        addParm("Wall CK", "Stiffness of the cross springs", "1");
-        addParm("Shear EK", "Extensional Stiffness of the shear edge springs", "0");
+        addParm("Wall EK", "Stiffness of the wall springs", "1");
+        addParm("Wall CK", "Stiffness of the wall springs", "1");
+        addParm("Shear EK", "Extensional Stiffness of the shear edge springs", "0.01");
         addParm("Shear CK", "Compression Stiffness of the shear edge springs", "1");
         addParm("Auxin-induced wall relaxation K1", "Auxin-induced wall relaxation K1", "0.05");
-        addParm("Auxin-induced wall relaxation K2", "Auxin-induced wall relaxation K2", "3");
-        addParm("Wall stress", "Wall stress", "1");
-        addParm("Wall stress K1", "Wall stress K1", "0.01");
-        addParm("Wall stress K2", "Wall stress K2", "2");
+        addParm("Auxin-induced wall relaxation K2", "Auxin-induced wall relaxation K2", "5");
+        addParm("Auxin-relaxation Minimum Wall EK", "Auxin-relaxation Minimum Wall EK", "0");
+        addParm("Quasimodo wall relaxation K", "Quasimodo wall relaxation K", "0");
+        addParm("ccvTIR wall relaxation K2", "ccvTIR wall relaxation K2", "0");
+        addParm("ccvTIR wall relaxation Tissue",
+                "ccvTIR wall relaxation Tissue",
+                "None",
+                QStringList()
+                              << "None"
+                              << "TIR1" // Everywhere
+                              << "KNOLLE" // Dividing cells
+                              << "SMB" // LRC
+                              << "GL2" // Meristem epidermis
+                              << "COBL9" // EZ epidermis
+                              << "PEP" // EZ Cortex
+                              << "NGR2" // Endodermis
+                              << "SHR" // Meristem Vascular
+                              << "GLV5" // Columella
+                              << "PIN2" // LRC-epidermis-cortex
+                              );
         // Hydrostatics
         addParm("Hydrostatic Parameters", "", "");
         addParm("Turgor Pressure", "Value of the turgor pressure in the cells", "2");
+        addParm("Turgor Pressure non-Meristem Reduction", "Reduction of turgor pressure in non-meristem cells", "0.8");
         addParm("Turgor Pressure Rate", "Value of the rate of turgor pressure in the cells", "0.5");
         // External Forces
         addParm("External Forces", "", "");
@@ -101,10 +118,14 @@ public:
         addParm("Gravity Direction", "Gravity Direction", "0,-1,0");
         addParm("Friction", "Friction", "0");
         // Misc
+        addParm("Root Process", "Name of the process for the Root", "Model/Root/01 Root");
         addParm("Tissue Process", "Name of Tissue Process", "Model/Root/03 Cell Tissue");
         addParm("PBD Engine",
                 "Name of PBD Engine",
                 "Model/Root/07 PBD Engine");
+        addParm("Set Global Attr Process",
+                "Name of the process for Set Global Attr",
+                "Model/Root/23 Set Global Attr");
     }
 
 
@@ -113,6 +134,7 @@ public:
     bool rewind(QWidget* parent);
     bool step();
     PBD* PBDProcess = 0;
+    SetGlobalAttr* setGlobalAttrProcess = 0;
     double Dt = 0;
     double userTime = 0;
     double realTime = 0;
@@ -129,8 +151,8 @@ private:
         const CCStructure& cs, const CCIndexDataAttr& indexAttr, CCIndex e, CCIndex v, int label);
 
     CCIndexDataAttr* indexAttr = 0;
+    Process* rootProcess = 0;
     Tissue* tissueProcess = 0;
-    double wallStress = 0, wallStressK1 = 0, wallStressK2 = 0;
     Point3d gravity;
     double convergeThresh = 1e-6;
     double convergenceLag = 0;
@@ -176,8 +198,7 @@ public:
         addParm("Strain Tensor",
                 "Strain Tensor",
                 "Green Strain Tensor",
-                QStringList() << "Green Strain Tensor"
-                              << "Shape Strain Tensor");
+                QStringList() << "Green Strain Tensor");
         addParm("Walls Growth", "Walls Growth", "");
         addParm("Strain Threshold for Growth", "Strain Threshold for Growth", "0.01");
         addParm("Walls Growth Rate", "Walls Growth Rate", "10");
@@ -191,9 +212,40 @@ public:
         addParm("MF Delete After Division", "MF Delete After Division","True",
                 QStringList() << "True"
                               << "False");
+        addParm("Prevent Cell Elongation", "The cell will stop growing when reaching max area if division is not allowed", "True",
+                QStringList() << "True"
+                              << "False");
         addParm("Zonation", "Zonation", "");
         addParm("Elongation Zone", "Elongation Zone", "50");
         addParm("Differentiation Zone", "Differentiation Zone", "100");
+        addParm("Auxin Control on Growth",
+                "Auxin Control on Growth",
+                "False",
+                                QStringList() << "True"
+                                              << "False");
+        addParm("Auxin inhibition on growth", "Auxin inhibition on growth", "10");
+        addParm("ccvTIR inhibition on growth", "ccvTIR inhibition on growth", "0");
+        addParm("ccvTIR growth Tissue",
+                "ccvTIR growth Tissue",
+                "None",
+                QStringList()
+                              << "None"
+                              << "TIR1" // Everywhere
+                              << "KNOLLE" // Dividing cells
+                              << "SMB" // LRC
+                              << "GL2" // Meristem epidermis
+                              << "COBL9" // EZ epidermis
+                              << "PEP" // Cortex
+                              << "NGR2" // Endodermis
+                              << "SHR" // Vascular
+                              << "GLV5" // Columella
+                              << "PIN2" // LRC-epidermis-cortex
+                              );
+        addParm("Brassinosteroids Control",
+                "Brassinosteroids Control",
+                "False",
+                                QStringList() << "True"
+                                              << "False");
         addParm("Mechanics Process",
                 "Name of Mechanics derivatives process",
                 "Model/Root/05 Mechanics");
@@ -213,12 +265,6 @@ private:
 };
 
 
-/* Suggestions:
- * - High auxin -> higher auxin degradation
- * - High auxin -> lower PIN degradation on membranes  (Paciorek et al. 2005.
- * - High auxin -> Lower PIN expression  (Vieten 2005) or higher PIN degradation in cytoplasm (Baster et al., 2013).
- * - Growth dynamically affect by auxin? (tested: does not seems to work well)
-*/
 class Chemicals : public Process {
 public:
     Chemicals(const Process& process)
@@ -254,10 +300,9 @@ public:
         addParm("Pin1 Max Trafficking Rate", "Pin1 Max Trafficking Rate", "1");
         addParm("Pin1 Max Amount Edge", "Pin1 Max Amount Edge( auxin per nm)", "15");
         addParm("Pin1-auxin export rate", "Pin1-auxin export rate", "1.4");
-        addParm("Pin1 Sensitivity Suppression by Auxin Amount",
-                "Pin1 Sensitivity Suppression by Auxin Amount (auxin per nm squared)", "400"); //// be careful
+        addParm("Pin Lateralization", "Pin spillover to adjecient membranes", "0");
         addParm("Pin1 Sensitivity Suppression by Auxin Max Cell",
-                "Pin1 Sensitivity Suppression by Auxin Max Cell (auxin per nm squared)", "True", QStringList() << "True" << "False" ); //// be careful
+                "Pin1 Sensitivity Suppression by Auxin Max Cell (auxin per nm squared)", "False", QStringList() << "True" << "False" ); //// be careful
         addParm("Simulate PIN4", "Simulate PIN4", "False", QStringList() << "True" << "False" );
         addParm("Columella Auto-Efflux", "Columella Auto-Efflux", "True", QStringList() << "True" << "False" );
         addParm("Pin1 Sensitivity MF K", "Pin1 Sensitivity MF K", "0");
@@ -302,6 +347,50 @@ public:
         addParm("Division Promoter Half-max Auxin-induced n", "Division Promoter Half-max Auxin-induced n", "4");
         addParm("Division Promoter Decay Rate", "Division Promoter Decay Rate", "0.01");
         addParm("Division Promoter Permeability", "Division Promoter Permeability", "1"); // 1 for the data, 5 for the figure
+        addParm("Quasimodo WT Production Rate", "Quasimodo WT Production Rate", "0.5");
+        addParm("Quasimodo Tissue Production Rate", "Quasimodo Tissue Production Rate", "0.5");
+        addParm("Quasimodo Decay Rate", "Quasimodo Decay Rate", "0.1");
+        addParm("Quasimodo Tissue",
+                "Quasimodo Tissue",
+                "None",
+                QStringList()
+                              << "None"
+                              << "All"
+                              << "Meristem"
+                              << "EpidermisCortex"
+                              << "EpidermisCortexMeristem"
+                              << "EpidermisCortexEZ"
+                              << "Undefined"
+                              << "QC"
+                              << "Columella"
+                              << "ColumellaInitial"
+                              << "CEI"
+                              << "CEID"
+                              << "Cortex"
+                              << "Endodermis"
+                              << "VascularInitial"
+                              << "Vascular"
+                              << "VascularMeristem"
+                              << "VascularEZ"
+                              << "Pericycle"
+                              << "EpLrcInitial"
+                              << "Epidermis"
+                              << "EpidermisMeristem"
+                              << "EpidermisEZ"
+                              << "LRC"
+                              << "Columella"
+                              << "Substrate"
+                              << "Source");
+        addParm("WOX5 Basal Production Rate", "WOX5 Basal Production Rate", "1");
+        addParm("WOX5 Induction by Auxin", "WOX5 Induction by Auxin", "1");
+        addParm("WOX5 Degradation by Auxin", "WOX5 Degradation by Auxin", "10");
+        addParm("WOX5 Decay Rate", "WOX5 Decay Rate", "0.1");
+        addParm("WOX5 Induction to Auxin", "WWOX5 Induction to Auxin", "0");
+        addParm("Brassinosteroid Basal Production", "Brassinosteroid Basal Production", "0");
+        addParm("Brassinosteroid Induced Production", "Induced Delay", "0");
+        addParm("Brassinosteroid Permeability", "Brassinosteroid Permeability", "0");
+        addParm("Brassinosteroid Decay", "Brassinosteroid Decay", "0");
+        addParm("Brassinosteroid Delay", "Brassinosteroid Delay", "0");        
         addParm("Phosphorilation", "Phosphorilation", "");
         addParm("PINOID Basal Production Rate", "PINOID Basal Production Rate", "10");
         addParm("PP2A Basal Production Rate", "PP2A Basal Production Rate", "10");
@@ -396,6 +485,37 @@ public:
                 "When using division algorithm 2, the closest existing division point will be used as \
                 joining point, up to this maximum distance",
                 "1" );
+        addParm("Split Division Plane",
+                "Split Division Plane",
+                "False",
+                                QStringList() << "True"
+                                              << "False");
+        addParm("Sabatinis's parameters",
+                "",
+                "");
+        addParm("Sabatini Control",
+                "Sabatini Control",
+                "False",
+                                QStringList() << "True"
+                                              << "False");
+
+        addParm("Division Coefficient Rate",
+                "Division Coefficient Rate",
+                "10");
+        addParm("Minimum Area Percentage",
+                "Minimum Area Percentage",
+                "0.75");
+        addParm("Maximum Area Percentage",
+                "Maximum Area Percentage",
+                "1.5");
+        addParm("Crisanto's parameters",
+                "",
+                "");
+        addParm("Division Control",
+                "Division Control",
+                "False",
+                                QStringList() << "True"
+                                              << "False");
         addParm("Minimum Polarity Vector Norm",
                 "Minimum Polarity Vector Norm",
                 "0.05" );
@@ -417,11 +537,26 @@ public:
         addParm("Division half-probability by Inhibitor",
                 "Division half-probability by Inhibitor",
                 "0.03" );
-        addParm("Division Control",
-                "Division Control",
+        addParm("Brassinosteroids Control",
+                "Brassinosteroids Control",
                 "False",
                                 QStringList() << "True"
                                               << "False");
+        addParm("Brassinosteroids Signalling",
+                "Brassinosteroids Signalling",
+                "None",
+                                QStringList() << "None"
+                                              << "Both"
+                                              << "Lower"
+                                              << "Upper"
+
+                );
+        addParm("WOX5 Control",
+                "WOX5 Control",
+                "False",
+                                QStringList() << "True"
+                                              << "False");
+
         addParm("Ignore Cell Type",
                 "Ignore Cell Type",
                 "False",
@@ -448,6 +583,13 @@ public:
         Mesh* mesh = currentMesh();
         return step(mesh, &subdiv);
     }
+
+    bool divideCell2dX(CCStructure &cs, CCIndexDataAttr &indexAttr, Tissue::VertexDataAttr &vMAttr, CCIndex cell,
+                           const Cell2dDivideParms &divParms, Subdivide *sDiv,
+                       Cell2dDivideParms::DivAlg divAl,
+                       const Point3d &divVector, std::set<CCIndex> divisionPoints,
+                       double maxJoiningDistance);
+
 
     // Run a step of cell division
     virtual bool step(Mesh* mesh, Subdivide* subdiv);
@@ -495,10 +637,6 @@ public:
     RootDivide(const Process& process)
         : CellDivision(process) {
         setName("Model/Root/04 Divide Cells");
-
-        addParm("Cell Division Enabled", "Cell Division Enabled", "True",
-                                                        QStringList() << "False"
-                                                                      << "True");
         addParm("Manual Cell Division Enabled", "Manual Cell Division Enabled", "False",
                                                         QStringList() << "False"
                                                                       << "True");
@@ -650,9 +788,6 @@ public:
                                                         QStringList() << "Hard"
                 << "Soft");
         addParm("Split Edges Max Length", "Split Edges Max Length", "3");
-
-        addParm("Remeshing Min Area", "Minimum triangle area that triggers remeshing", "0");
-        addParm("Remeshing Max Area", "Maximum triangle area that triggers remeshing", "100");
         addParm("Tissue Process", "Name of Tissue Process", "Model/Root/03 Cell Tissue");
         addParm("Triangulate Faces", "Triangulate Faces", "Model/Root/Triangulate Faces");
         addParm("ClearCells", "ClearCells", "Model/Root/ClearCells");
@@ -713,15 +848,7 @@ public:
 
         if(cellToRemesh.size() == 0)
             return;
-/*
-        for(int label : cellToRemesh) {
-            CCIndex ft = clearCellsProcess->clearCell(label);
-            updateGeometry(cs, (*indexAttr));
-            (*indexAttr)[ft].selected = true;
-        }
 
-        triangulateProcess->step();
-        tissueProcess->initialize();*/
         step(true, false, false);
 
         return ;
@@ -834,9 +961,7 @@ public:
                               << "None");
         addParm("Remesh during execution",
                 "Remesh during execution",
-                "True",
-                QStringList() << "True"
-                              << "False");
+                "0");
         addParm("Mesh Update Timer", "Mesh Update Timer", "1");
         addParm("Snapshots Timer",
                 "Time frames between snapshots",
@@ -851,6 +976,7 @@ public:
                               << "True");
         addParm("Debug File", "Debug File", "debug.csv");
         addParm("Frame fixed on QC", "Frame fixed on QC", "0");
+        addParm("Set Global Attr Process","Name of the process for Set Global Attr", "Model/Root/23 Set Global Attr");
         addParm("Frame fixed on Substrate", "Frame fixed on Substrate", "0");
         addParm("Execution Time", "Execution Time", "0");
         addParm("Output Mesh", "Output Mesh", "output.mdxm");
@@ -881,6 +1007,7 @@ public:
                 "Model/Root/23 Set Global Attr");
         addParm("Triangulate Faces", "Triangulate Faces", "Model/Root/Triangulate Faces");
         addParm("Remesh", "Remesh", "Model/Root/02 Remesh");
+        addParm("RemeshCell", "RemeshCell", "Model/Root/Remesh Cell");
         addParm("SplitEdges", "SplitEdges", "Mesh/Structure/Split Edges");
         addParm("SaveView", "SaveView", "Tools/System/Save View");
         addParm("SaveMesh", "SaveMesh", "Mesh/System/Save");
@@ -910,11 +1037,13 @@ public:
     SetGlobalAttr* setGlobalAttrProcess = 0;
     TriangulateFacesX* triangulateProcess = 0;
     Remesh* remeshProcess = 0;
+    RemeshCell* remeshCellProcess = 0;
     Process* splitEdgesProcess = 0;
     SaveViewFile* saveViewProcess = 0;
     MeshSave* saveMeshProcess = 0;
     std::vector<Process*> processes;
     double userTime = 0;
+    int stepCount = 0, prevStepCount = 0;
 
 private:
     bool debugging = false;
@@ -926,7 +1055,6 @@ private:
     bool chemicalsEnabled = true;
     bool growthEnabled = true;
     bool divisionEnabled = true;
-    int stepCount = 0, prevStepCount = 0;
     clock_t begin_clock, prev_clock;
     std::ofstream output_file;
     int maxMechanicsIter = 0, maxChemicalIter = 0;
@@ -1485,7 +1613,7 @@ public:
         addParm("Undefined Shear EK", "", "-1");
         addParm("Undefined Shear CK", "", "-1");
         addParm("Undefined Turgor Pressure", "", "-1");
-        addParm("Undefined Growth Factor", "", "0");
+        addParm("Undefined Wall Max GR", "", "-1");
         addParm("Undefined Max area", "", "10000");
         addParm("Undefined MF reorientation rate", "", "0");
         addParm("QC Wall EK", "", "1");
@@ -1493,14 +1621,14 @@ public:
         addParm("QC Shear EK", "", "1");
         addParm("QC Shear CK", "", "1");
         addParm("QC Turgor Pressure", "", "0");
-        addParm("QC Growth Factor", "", "0");
+        addParm("QC Wall Max GR", "", "-1");
         addParm("QC Max area", "", "1000");
         addParm("QC MF reorientation rate", "", "0");
         addParm("ColumellaInitial Wall EK", "", "-1");
         addParm("ColumellaInitial Wall CK", "", "-1");
         addParm("ColumellaInitial Shear EK", "", "-1");
         addParm("ColumellaInitial Shear CK", "", "-1");
-        addParm("ColumellaInitial Growth Factor", "", "1");
+        addParm("ColumellaInitial Wall Max GR", "", "-1");
         addParm("ColumellaInitial Turgor Pressure", "", "1");
         addParm("ColumellaInitial Max area", "", "100");
         addParm("ColumellaInitial MF reorientation rate", "", "0");
@@ -1508,7 +1636,7 @@ public:
         addParm("Columella Wall CK", "", "-1");
         addParm("Columella Shear EK", "", "-1");
         addParm("Columella Shear CK", "", "-1");
-        addParm("Columella Growth Factor", "", "1");
+        addParm("Columella Wall Max GR", "", "-1");
         addParm("Columella Turgor Pressure", "", "1");
         addParm("Columella MF reorientation rate", "", "0");
         addParm("Columella Max area", "", "150");
@@ -1517,7 +1645,7 @@ public:
         addParm("VascularInitial Shear EK", "", "-1");
         addParm("VascularInitial Shear CK", "", "-1");
         addParm("VascularInitial Turgor Pressure", "", "-1");
-        addParm("VascularInitial Growth Factor", "", "5");
+        addParm("VascularInitial Wall Max GR", "", "-1");
         addParm("VascularInitial MF reorientation rate", "", "-1");
         addParm("VascularInitial Max area", "", "70");
         addParm("Vascular Wall EK", "", "-1");
@@ -1525,7 +1653,7 @@ public:
         addParm("Vascular Shear EK", "", "-1");
         addParm("Vascular Shear CK", "", "-1");
         addParm("Vascular Turgor Pressure", "", "-1");
-        addParm("Vascular Growth Factor", "", "5");
+        addParm("Vascular Wall Max GR", "", "-1");
         addParm("Vascular MF reorientation rate", "", "0");
         addParm("Vascular Max area", "", "100");
         addParm("Pericycle Wall EK", "", "-1");
@@ -1533,7 +1661,7 @@ public:
         addParm("Pericycle Shear EK", "", "-1");
         addParm("Pericycle Shear CK", "", "-1");
         addParm("Pericycle Turgor Pressure", "", "-1");
-        addParm("Pericycle Growth Factor", "", "1");
+        addParm("Pericycle Wall Max GR", "", "-1");
         addParm("Pericycle MF reorientation rate", "", "-1");
         addParm("Pericycle Max area", "", "75");
         addParm("Cortex Wall EK", "", "-1");
@@ -1541,7 +1669,7 @@ public:
         addParm("Cortex Shear EK", "", "-1");
         addParm("Cortex Shear CK", "", "-1");
         addParm("Cortex Turgor Pressure", "", "-1");
-        addParm("Cortex Growth Factor", "", "1");
+        addParm("Cortex Wall Max GR", "", "-1");
         addParm("Cortex Max area", "", "75");
         addParm("Cortex MF reorientation rate", "", "-1");
         addParm("Endodermis Wall EK", "", "-1");
@@ -1549,7 +1677,7 @@ public:
         addParm("Endodermis Shear EK", "", "-1");
         addParm("Endodermis Shear CK", "", "-1");
         addParm("Endodermis Turgor Pressure", "", "-1");
-        addParm("Endodermis Growth Factor", "", "1");
+        addParm("Endodermis Wall Max GR", "", "-1");
         addParm("Endodermis Max area", "", "50");
         addParm("Endodermis MF reorientation rate", "", "-1");
         addParm("Epidermis Wall EK", "", "-1");
@@ -1557,7 +1685,7 @@ public:
         addParm("Epidermis Shear EK", "", "-1");
         addParm("Epidermis Shear CK", "", "-1");
         addParm("Epidermis Turgor Pressure", "", "-1");
-        addParm("Epidermis Growth Factor", "", "1");
+        addParm("Epidermis Wall Max GR", "", "-1");
         addParm("Epidermis Max area", "", "75");
         addParm("Epidermis MF reorientation rate", "", "-1");
         addParm("CEI Wall EK", "", "-1");
@@ -1565,7 +1693,7 @@ public:
         addParm("CEI Shear EK", "", "-1");
         addParm("CEI Shear CK", "", "-1");
         addParm("CEI Turgor Pressure", "", "-1");
-        addParm("CEI Growth Factor", "", "1");
+        addParm("CEI Wall Max GR", "", "-1");
         addParm("CEI Max area", "", "150");
         addParm("CEI MF reorientation rate", "", "-1");
         addParm("CEID Wall EK", "", "-1");
@@ -1573,7 +1701,7 @@ public:
         addParm("CEID Shear EK", "", "-1");
         addParm("CEID Shear CK", "", "-1");
         addParm("CEID Turgor Pressure", "", "-1");
-        addParm("CEID Growth Factor", "", "1");
+        addParm("CEID Wall Max GR", "", "-1");
         addParm("CEID Max area", "", "100");
         addParm("CEID MF reorientation rate", "", "-1");
         addParm("EpLrcInitial Wall EK", "", "-1");
@@ -1581,7 +1709,7 @@ public:
         addParm("EpLrcInitial Shear EK", "", "-1");
         addParm("EpLrcInitial Shear CK", "", "-1");
         addParm("EpLrcInitial Turgor Pressure", "", "-1");
-        addParm("EpLrcInitial Growth Factor", "", "1");
+        addParm("EpLrcInitial Wall Max GR", "", "-1");
         addParm("EpLrcInitial Max area", "", "50");
         addParm("EpLrcInitial MF reorientation rate", "", "-1");
         addParm("LRC Wall EK", "", "-1");
@@ -1589,7 +1717,7 @@ public:
         addParm("LRC Shear EK", "", "-1");
         addParm("LRC Shear CK", "", "-1");
         addParm("LRC Turgor Pressure", "", "-1");
-        addParm("LRC Growth Factor", "", "1");
+        addParm("LRC Wall Max GR", "", "-1");
         addParm("LRC Max area", "", "75");
         addParm("LRC MF reorientation rate", "", "-1");
         addParm("Substrate Wall EK", "", "-1");
@@ -1597,7 +1725,7 @@ public:
         addParm("Substrate Shear EK", "", "-1");
         addParm("Substrate Shear CK", "", "-1");
         addParm("Substrate Turgor Pressure", "", "-1");
-        addParm("Substrate Growth Factor", "", "0");
+        addParm("Substrate Wall Max GR", "", "-1");
         addParm("Substrate MF reorientation rate", "", "0");
         addParm("Substrate Max area", "", "1000");
         addParm("Source Wall EK", "", "1");
@@ -1605,7 +1733,7 @@ public:
         addParm("Source Shear EK", "", "1");
         addParm("Source Shear CK", "", "1");
         addParm("Source Turgor Pressure", "", "-1");
-        addParm("Source Growth Factor", "", "0");
+        addParm("Source Wall Max GR", "", "-1");
         addParm("Source MF reorientation rate", "", "0");
         addParm("Source Max area", "", "1000");
 
@@ -1655,6 +1783,35 @@ public:
 
     }
     bool step();
+};
+
+
+class ResetTurgorPressure : public Process {
+public:
+    ResetTurgorPressure(const Process& process)
+        : Process(process) {
+        setName("Model/Root/5 Reset Turgor Pressure");
+        setDesc("Reset Turgor Pressure.");
+
+    }
+    bool step() {
+        Mesh* mesh = getMesh("Mesh 1");
+        if(!mesh or mesh->file().isEmpty())
+            throw(QString("Reset Turgor Pressure No current mesh"));
+
+        QString ccName = mesh->ccName();
+        if(ccName.isEmpty())
+            throw(QString("Reset Turgor Pressure, no cell complex selected"));
+
+        Tissue::CellDataAttr& cellAttr = mesh->attributes().attrMap<int, Tissue::CellData>("CellData");
+
+        for(auto c : cellAttr) {
+            Tissue::CellData& cD = cellAttr[c.first];
+            cD.pressure = 0;
+        }
+
+        return false;
+    }
 };
 
 
@@ -1893,38 +2050,64 @@ public:
 
 
 
-
-/*
-class ReadRootVerticesFromFile : public Process {
+class RemeshCell : public Process {
 public:
-    ReadRootVerticesFromFile(const Process &process) : Process(process) {
-        setName("Model/Root/Read Root Vertices From File");
-        addParm("File", "File", "");
-        addParm("Scale", "Scale", "1");
+    RemeshCell(const Process& process)
+        : Process(process) {
+        setName("Model/Root/Remesh Cell");
+        addParm("Root Process", "Name of the process for the Root", "Model/Root/01 Root");
+        addParm("Remesh", "Remesh", "Model/Root/02 Remesh");
+        addParm("Tissue Process", "Name of Tissue Process", "Model/Root/03 Cell Tissue");
+        addParm("Triangulate Faces Process", "Triangulate Faces", "Model/Root/Triangulate Faces");
+        addParm("ClearCells Process", "ClearCells", "Model/Root/ClearCells");
+
     }
-    bool step() {
-        Mesh *mesh = getMesh("Mesh 1");
-        if (!mesh or mesh->file().isEmpty())
-            throw(QString("Root::ReadRootVerticesFromFile No current mesh"));
 
-        CCStructure &cs = mesh->ccStructure("Root");
-        CCIndexDataAttr &indexAttr = mesh->indexAttr();
+    bool step(int label) {
+        Mesh* mesh = getMesh("Mesh 1");
+        if(!mesh or mesh->file().isEmpty())
+            throw(QString("Root::AddFace No current mesh"));
 
-        std::ifstream file(parm("File").toStdString());
-        double scale = parm("Scale").toDouble();
-        std::string   line;
+        QString ccName = mesh->ccName();
+        if(ccName.isEmpty())
+            throw(QString("Root::AddFace Error, no cell complex selected"));
 
-        while(std::getline(file, line))
-        {
-            double x = std::stod(line.substr(0, line.find(',')));
-            double y = std::stod(line.substr(line.find(',')+1, line.size()));
-            CCIndex v = CCIndexFactory.getIndex();
-            cs.addCell(v);
-            indexAttr[v].pos = Point3d(x/scale, y/scale, 0);
-        }
+        if(!getProcess(parm("Root Process"), rootProcess))
+            throw(QString("Root::initialize Cannot make root process"));
+        if(!getProcess(parm("Remesh"), remeshProcess))
+            throw(QString("Root::initialize Cannot make Remesh") + parm("Remesh"));
+        if(!getProcess(parm("Triangulate Faces Process"), triangulateProcess))
+            throw(QString("Root::initialize Cannot make Triangulate Faces Process") +
+                  parm("Triangulate Faces"));
+        if(!getProcess(parm("ClearCells Process"), clearCellsProcess))
+            throw(QString("Root::initialize Cannot make ClearCells") + parm("ClearCells Process"));
+        if(!getProcess(parm("Tissue Process"), tissueProcess))
+            throw(QString("Root::initialize Cannot make Tissue Process") + parm("Tissue Process"));
+
+        CCStructure& cs = mesh->ccStructure(ccName);
+        CCIndexDataAttr& indexAttr = mesh->indexAttr();
+        Tissue::CellDataAttr& cellAttr = mesh->attributes().attrMap<int, Tissue::CellData>("CellData");
+
+        Tissue::CellData& cD = cellAttr[label];
+        clearCellsProcess->clearCell(cD.label);
+        updateGeometry(cs, indexAttr);
+        indexAttr[*(cD.cellFaces)->begin()].selected = true;
+        triangulateProcess->step();
+        tissueProcess->initialize();
+        remeshProcess->step(true, false, true);
+        mesh->updateAll();
+
         return false;
     }
-};*/
+    Root* rootProcess = 0;
+    Remesh* remeshProcess = 0;
+    ClearCells* clearCellsProcess = 0;
+    TriangulateFacesX* triangulateProcess = 0;
+    Tissue* tissueProcess = 0;
+};
+
+
+
 
 } // namespace ROOT
 

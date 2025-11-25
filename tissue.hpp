@@ -31,6 +31,7 @@
 using namespace mdx;
 
 
+
 const double EPS = 1e-6;
 const double BIG_VAL = 100000;
 
@@ -324,9 +325,12 @@ public:
         double invmassVertices = 1;
         Point3d a1 = Point3d(0, EPS, 0), a2 = Point3d(EPS, 0, 0);
         double mfRORate = -1;
-        double growthFactor = 0;
+        double wallsMaxGR = -1;
+        double lifeTime = 0;
+        double remeshTime = 0;
         double lastDivision = 0;
         double divisionCount = 0;
+        int stage = 0; // Meristem, elongation, differentiation
         Point3d axisMin, axisMax, prev_axisMin, prev_axisMax;
         bool periclinalDivision = false;
         int divAlg = -1;
@@ -335,13 +339,15 @@ public:
         Point3d restCm;
         Matrix3d invRestMat;
         std::vector<Point3d> restX0;
+        double growthSignal = 1;
         double auxin = 0, prevAuxin = 0;
         double Pin1 = 0;
         double Aux1 = 0;
         double PINOID = 0;
         double PP2A = 0;
         double divInhibitor = 0, divPromoter = 0;
-        double lifeTime = 0;
+        double quasimodo = 0;
+        double wox5 = 0; bool QCwox5Flag = false;
         double pressure = 1, pressureMax = -1;
         double auxinProdRate = -1;
         double auxinDecayRate = 0;
@@ -350,6 +356,13 @@ public:
         double aux1ProdRate = -1;
         double aux1InducedRate = -1;
         double aux1MaxEdge = -1;
+        double brassinosteroids = 0;
+        double brassinosteroidProd = 0;
+        int brassinosteroidTarget = 0;
+        double brassinosteroidSignal = 1;
+        int brassinosteroidTop = -1;
+        int brassinosteroidMother = 0;
+        bool is_ccvTIR1tissue = false;
 
         // other dinamically loaded attribute
         bool selected = false;
@@ -357,19 +370,19 @@ public:
         Point3d divVector = Point3d(1., 0., 0.);
         bool mfDelete = false;
         double perimeter = 0;
-        double wallStress = -1;
         std::vector<Point3d> box;
         Point3d centroid;
         std::map<CCIndex, double> perimeterAngles;
         double growthRate = 0, axisMin_growthRate = 0, axisMax_growthRate = 0;
         std::vector<double> growthRates, axisMin_grs, axisMax_grs;
-        Matrix3d G, E, U, M, M0, S, F = Matrix3d().identity(), R = Matrix3d().identity();
-        double gMax = 0, gMin = 0, gAngle = 0, sMax = 0, sMin = 0, sAngle = 0;
+        Matrix3d G, E, U = Matrix3d().identity();
+        double gMax = 0, gMin = 0, gAngle = 0;
         bool divisionAllowed = true;
         double divProb = 0;
         std::map<int, Point3d> auxinFluxes;
         Point3d auxinFluxVector;
         Point3d auxinGradientVector;
+        double totalStiffness = 0;
 
         // visuals
         CCIndex a1_v1, a1_v2, a1_e, a2_v1, a2_v2, a2_e,
@@ -567,6 +580,9 @@ public:
             PINOID = 0;
             divPromoter = 0;
             divInhibitor = 0;
+            quasimodo = 0;
+            wox5 = 0;
+            brassinosteroids = 0;
             auxinFluxes.clear();
             auxinFluxVector = Point3d(0, 0, 0);
         }
@@ -575,11 +591,11 @@ public:
             a1 = Point3d(1, 1, 0) * EPS, a2 = Point3d(1, 1, 0) * EPS;
             restArea = area;
             restCm = centroid;
+            pressure = 0;
             pressureMax = -1;
             shapeInit = false;
             invmassVertices = 1;            
             mfRORate = -1;
-            wallStress = -1;
             for(CCIndex f : *cellFaces){
                 FaceData &fD = faceAttr[f];
                 fD.resetMechanics();
@@ -593,7 +609,7 @@ public:
             area = 0;
             centroid = Point3d(0, 0, 0);
             // deformation gradient and green strain tensor
-            G = 0, E = 0, F = 0;
+            G = 0, E = 0;
             int i = 0;
             for(CCIndex f : *cellFaces) {
                 FaceData fD = faceAttr[f];
@@ -602,19 +618,20 @@ public:
                 if(fD.type == Membrane) {
                     E += fD.E;
                     G += fD.G;
-                    F += fD.F;
                     i++;
                 }
             }
             centroid /= cellFaces->size();
             E /= i;
             G /= i;
-            F /= i;
 
-            // perimeter length
-            perimeter = 0;
-            for(CCIndex e : perimeterEdges)
+            // perimeter length and total stiffness
+            perimeter = 0; totalStiffness = 0;
+            for(CCIndex e : perimeterEdges) {
                 perimeter += edgeAttr[e].length;
+                totalStiffness += edgeAttr[e].eStiffness;
+            }
+            totalStiffness /= perimeterEdges.size();
 
             // cell growth rate
             if(Dt > 0)
@@ -657,14 +674,14 @@ public:
             if(lineage == 0)
                 lineage = label;
             // find my faces
-            uint old_cellFaces = cellFaces->size();
+            std::set<CCIndex> old_cellFaces = *cellFaces;
             cellFaces->clear();
             for(CCIndex f : cs.faces())
                 if(indexAttr[f].label == label) {
                     cellFaces->insert(f);
                     faceAttr[f].owner = this;
                 }
-            if(old_cellFaces != cellFaces->size())
+            if(old_cellFaces != *cellFaces)
                      shapeInit = false;
 
             // update the geometry
@@ -823,51 +840,7 @@ public:
                     if(axisMin_grs.size() > 0)
                         axisMin_growthRate /= axisMin_grs.size();
                 }
-                /*
-                // rest shape tensor
-                M0 = 0;
-                for(auto v : perimeterVertices) {
-                    M0[0][0] += pow(vMAttr[v].restPos[0] - restCm[0], 2);
-                    M0[1][1] += pow(vMAttr[v].restPos[1] - restCm[1], 2);
-                    M0[0][1] += (vMAttr[v].restPos[0] - restCm[0]) * (vMAttr[v].restPos[1] - restCm[1]);
-                    M0[1][0] += (vMAttr[v].restPos[0] - restCm[0]) * (vMAttr[v].restPos[1] - restCm[1]);
-                }
-                M0 /= perimeterVertices.size();
 
-                // current shape tensor
-                M = 0;
-                for(auto v : perimeterVertices) {
-                    M[0][0] += pow(indexAttr[v].pos[0] - centroid[0], 2);
-                    M[1][1] += pow(indexAttr[v].pos[1] - centroid[1], 2);
-                    M[0][1] += (indexAttr[v].pos[0] - centroid[0]) * (indexAttr[v].pos[1] - centroid[1]);
-                    M[1][0] += (indexAttr[v].pos[0] - centroid[0]) * (indexAttr[v].pos[1] - centroid[1]);
-                }
-                M /= perimeterVertices.size();
-
-                // shape tensor strain
-                S = (M - M0);
-                for(int i = 0; i < 3; i++)
-                    for(int j = 0; j < 3; j++)
-                        S[i][j] = S[i][j] / transpose(M0)[i][j];
-
-                // principal components of the shape strain tensor
-                sAngle = sMax = sMin = 0;
-                if((S[0][0] - S[1][1]) != 0) {
-                    sAngle = (0.5 * atan(2 * S[0][1] / (S[0][0] - S[1][1]) )) ;
-                    double left = (S[0][0] + S[1][1]) / 2;
-                    double right = sqrt(pow((S[0][0] - S[1][1]) / 2, 2) + pow(S[0][1]/2, 2));
-                    sMax = left + right;
-                    sMin = left - right;
-                }
-                if(S[0][0] < S[1][1])
-                    if(sAngle > -(M_PI/4) && sAngle < (M_PI/4))
-                        sAngle += (M_PI/2);
-                */
-
-                /*if(axisMax[1] < 0)
-                    axisMax *= -1;
-                if(axisMin[1] < 0)
-                    axisMin *= -1;*/
             } else
                 mdxInfo << "Cell " << label << " has no vertices!?!?" << endl;
 
@@ -882,8 +855,9 @@ public:
 
         }
 
-        void division(const CCStructure &cs, CellDataAttr& cellAttr,
-                       FaceDataAttr& faceAttr, EdgeDataAttr &edgeAttr, CellData& cD1, CellData& cD2, std::map<CellType, int> maxAreas, bool ignoreCellType=false) ;
+        void division(const CCStructure &cs, const CCIndexDataAttr& indexAttr, CellDataAttr& cellAttr,
+                       FaceDataAttr& faceAttr, EdgeDataAttr &edgeAttr, VertexDataAttr& vMAttr,
+                      CellData& cD1, CellData& cD2, std::map<CellType, int> maxAreas, bool ignoreCellType=false) ;
 
 
     };
@@ -911,6 +885,7 @@ public:
         double prevLength = 0, length = 0;
         double prev_strain = 0, strain = 0;
         double strainRate = 0;
+        double updateRate = 0;
         double eStiffness = -1;
         double cStiffness = -1;
         double intercellularAuxin = 0;
@@ -926,9 +901,6 @@ public:
         std::map<CCIndex, Point3d> outwardNormal;
         std::map<int, double> auxinFluxImpact, MFImpact, geomImpact;
         std::map<int, double> pin1Sensitivity, pin1SensitivityRaw;
-        double sigmaEv = 0, sigmaEe = 0;
-        Point3d sigmaForce = Point3d(0, 0, 0);
-        std::vector<Point3d> sigmaForces;
         Point3d pressureForce = Point3d(0, 0, 0);
 
         CCIndex pin_v1_1, pin_v2_1, pin_v3_1, pin_v4_1, pin_e1_1, pin_e2_1, pin_e3_1, pin_e4_1, pin_f_1;
@@ -1195,9 +1167,10 @@ public:
         double pressure = 0;
         double edgeStrain = 0;
         double edgeStiffness = 0;
+        double edgeUpdateRate = 0;
         double MFImpact = 0, auxinFluxImpact = 0, geomImpact = 0, auxinRatio = 0, auxinGrad = 0;
         double pin1Sensitivity = 0, pin1SensitivityRaw = 0;
-        Matrix3d E, G, V, dV, F = Matrix3d().identity(), R = Matrix3d().identity(), U = Matrix3d().identity(), Ev, F1, F2, sigmaA;
+        Matrix3d E, G, V, dV, F = Matrix3d().identity(), R = Matrix3d().identity(), U = Matrix3d().identity(), Ev, F1, F2;
         Point3d divVector = Point3d(1., 0., 0.);
         double auxin = 0, Aux1Cyt = 0, Pin1Cyt = 0, divInhibitorCyt = 0,
                Aux1Mem = 0, Pin1Mem = 0, intercellularAuxin = 0, PINOIDMem = 0, PP2AMem = 0,
@@ -1242,7 +1215,7 @@ public:
             area = indexAttr[f].measure;
             growthRate = owner->growthRate;
             std::vector<CCIndex> vs = faceVertices(cs, f);
-            Point3d x_p[3] = {vMAttr[vs[0]].prevPos,vMAttr[vs[1]].prevPos,vMAttr[vs[2]].prevPos}; ////// NW
+            Point3d x_p[3] = {vMAttr[vs[0]].prevPos,vMAttr[vs[1]].prevPos,vMAttr[vs[2]].prevPos};
             Point3d X_p[3] = {indexAttr[vs[0]].pos, indexAttr[vs[1]].pos, indexAttr[vs[2]].pos};
             F = DefGradient(x_p, X_p);
             F[2][2] = 1;

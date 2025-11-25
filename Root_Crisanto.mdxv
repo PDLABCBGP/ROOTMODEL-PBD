@@ -71,15 +71,15 @@ Shininess: 32
 Specular: 0.2
 UnsharpStrength: 1
 MaxNbPeels: 10
-CameraFrame: 1 0 0 0 0 1 0 0 0 0 1 0 -19.5967 189.979 -1156.48 1
+CameraFrame: 0.999954 0.00338021 0.00895253 0 -0.0032267 0.999848 -0.0171072 0 -0.009009 0.0170775 0.999814 0 -11.773 249.311 -1002.14 1
 SceneRadius: 500
-CameraZoom: -1.056
+CameraZoom: 0.384
 
 
 [Clip1]
 Enable: false
 Grid: false
-Width: 116.714
+Width: 105.639
 GridSize: 1
 GridSquares: 3
 GridColor: 11
@@ -90,7 +90,7 @@ Frame: 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1
 [Clip2]
 Enable: false
 Grid: false
-Width: 116.714
+Width: 105.639
 GridSize: 1
 GridSquares: 3
 GridColor: 12
@@ -101,7 +101,7 @@ Frame: 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1
 [Clip3]
 Enable: false
 Grid: false
-Width: 116.714
+Width: 105.639
 GridSize: 1
 GridSquares: 3
 GridColor: 13
@@ -112,7 +112,7 @@ Frame: 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1
 [Stack1]
 StackFile: 
 WorkStackFile: 
-MeshFile: Root_model.mdxm
+MeshFile: Root_Crisanto.mdxm
 MainShow: false
 MainBright:1
 MainOpacity:0.8
@@ -136,14 +136,14 @@ ScaleX:1
 ScaleY:1
 ScaleZ:1
 Scale:1.73205
-LoadMeshScaleUm: true
+LoadMeshScaleUm: false
 LoadMeshTransform: false
 MeshShift: 0
 CCName: Tissue
 MainColorMap: Interpolation:\srgb\nClamp:\strue\nExteriorColor:\s0,0,0,0\nColoredPos:\s0-0,0,0,0\nColoredPos:\s1-0,1,0,1\n
 WorkColorMap: Interpolation:\srgb\nClamp:\strue\nExteriorColor:\s0,0,0,0\nColoredPos:\s0-0,0,0,0\nColoredPos:\s1-0,1,1,1\n
 Frame: 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1
-Trans: 1 0 0 0 0 1 0 0 0 0 1 0 -0.375124 -215.322 0 1
+Trans: 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1
 
 
 [Stack2]
@@ -188,7 +188,7 @@ DrawCutSurf: false
 Mode: 0
 CutSurfGrid: false
 Material: 0
-Size: 1.05763 1.05763 1.05763
+Size: 1.06219 1.06219 1.06219
 SurfSize: 15 15
 LineWidth: 1
 BezPoints: 5 5
@@ -1021,7 +1021,7 @@ ParmString: No
 ProcessName: Mesh/System/Load
 NumParms: 4
 ParmName: File Name
-ParmString: /home/marco/trabajo/MDX models/Root/Root_model.mdxm
+ParmString: /home/marco/trabajo/MDX models/RootModel/Root_model.mdxm
 ParmName: Transform
 ParmString: no
 ParmName: Add
@@ -1103,7 +1103,7 @@ ParmString:
 ProcessName: Mesh/System/Save
 NumParms: 3
 ParmName: File Name
-ParmString: /home/marco/trabajo/MDX models/Root/Root_model.mdxm
+ParmString: /home/marco/trabajo/MDX models/Root/Root_Crisanto.mdxm
 ParmName: Transform
 ParmString: no
 ParmName: Mesh Id
@@ -1141,9 +1141,9 @@ ParmString: Hard
 ParmName: Remesh during execution
 ParmString: 0
 ParmName: Mesh Update Timer
-ParmString: 3
+ParmString: 30
 ParmName: Snapshots Timer
-ParmString: 0
+ParmString: 30
 ParmName: Snapshots Directory
 ParmString: Test
 ParmName: Debug
@@ -1151,11 +1151,11 @@ ParmString: True
 ParmName: Debug File
 ParmString: debug.csv
 ParmName: Frame fixed on QC
-ParmString: 0,220
+ParmString: 0,180
 ParmName: Frame fixed on Substrate
 ParmString: 0,0
 ParmName: Execution Time
-ParmString: 10000
+ParmString: 14000
 ParmName: Output Mesh
 ParmString: mesh.mdxm
 ParmName: Tissue Process
@@ -1233,7 +1233,7 @@ ParmString: False
 ParmName: Draw Auxin-Flux Rescale
 ParmString: 10
 ParmName: Draw PGD Rescale
-ParmString: 2
+ParmString: 0
 ParmName: Draw PINs
 ParmString: 0.04
 ParmName: Verbose
@@ -1273,7 +1273,7 @@ ParmString: 1.5
 ParmName: Crisanto's parameters
 ParmString: 
 ParmName: Division Control
-ParmString: False
+ParmString: True
 ParmName: Minimum Polarity Vector Norm
 ParmString: 0.05
 ParmName: Max Division Time
@@ -1281,7 +1281,7 @@ ParmString: 50
 ParmName: Min Division Time
 ParmString: 2
 ParmName: Division Meristem Size
-ParmString: 200
+ParmString: 300
 ParmName: Division Promoter Level
 ParmString: 0.05
 ParmName: Division half-probability by Cell Size Ratio
@@ -1397,7 +1397,7 @@ ParmString: 0.01
 ParmName: Converge Threshold
 ParmString: 0.1
 ParmName: Verbose
-ParmString: False
+ParmString: True
 ParmName: Debug Steps
 ParmString: 10
 ParmName: Auxin
@@ -1413,7 +1413,7 @@ ParmString: 0
 ParmName: Auxin QC Basal Production Rate
 ParmString: 0
 ParmName: Auxin SCN Basal Production Rate
-ParmString: 0
+ParmString: 5
 ParmName: Auxin Decay Rate
 ParmString: 0.0125
 ParmName: Auxin Max Decay Rate
@@ -1447,7 +1447,7 @@ ParmString: 0
 ParmName: Pin1 Sensitivity Suppression by Auxin Max Cell
 ParmString: True
 ParmName: Simulate PIN4
-ParmString: False
+ParmString: True
 ParmName: Columella Auto-Efflux
 ParmString: True
 ParmName: Pin1 Sensitivity MF K
@@ -1497,11 +1497,11 @@ ParmString:
 ParmName: Division Inhibitor Basal Production Rate
 ParmString: 0
 ParmName: Division Inhibitor Max Promoter-induced Expression
-ParmString: 2
+ParmString: 20
 ParmName: Division Inhibitor Half-max Promoter-induced K
-ParmString: 0.5
+ParmString: 5
 ParmName: Division Inhibitor Half-max Promoter-induced n
-ParmString: 4
+ParmString: 2
 ParmName: Division Inhibitor Decay Rate
 ParmString: 0.01
 ParmName: Division Inhibitor Permeability
@@ -1511,15 +1511,15 @@ ParmString:
 ParmName: Division Promoter Basal Production Rate
 ParmString: 0
 ParmName: Division Promoter Max Auxin-induced Expression
-ParmString: 2
+ParmString: 20
 ParmName: Division Promoter Half-max Auxin-induced K
-ParmString: 0.5
+ParmString: 2
 ParmName: Division Promoter Half-max Auxin-induced n
 ParmString: 4
 ParmName: Division Promoter Decay Rate
 ParmString: 0.01
 ParmName: Division Promoter Permeability
-ParmString: 0
+ParmString: 1
 ParmName: Quasimodo Basal Production Rate
 ParmString: 1
 ParmName: Quasimodo Decay Rate
@@ -2957,13 +2957,13 @@ NumParms: 0
 ProcessName: Tools/System/Load View
 NumParms: 1
 ParmName: File Name
-ParmString: Root_model.mdxv
+ParmString: Root_Crisanto.mdxv
 ProcessName: Tools/System/Quick Save
 NumParms: 0
 ProcessName: Tools/System/Save View
 NumParms: 1
 ParmName: File Name
-ParmString: /home/marco/trabajo/MDX models/Root/Root_model.mdxv
+ParmString: /home/marco/trabajo/MDX models/Root/Root_Crisanto.mdxv
 ProcessName: Tools/System/Snapshot
 NumParms: 6
 ParmName: File Name

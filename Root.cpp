@@ -7,15 +7,19 @@ using namespace ROOT;
 bool Mechanics::initialize(QWidget* parent) {
     Mesh* mesh = getMesh("Mesh 1");
     if(!mesh)
-        throw(QString("MechanicalGrowth::step No current mesh"));
+        throw(QString("Mechanics::step No current mesh"));
 
+    if(!getProcess(parm("Root Process"), rootProcess))
+            throw(QString("Root::initialize Cannot make root process"));
     if(!getProcess(parm("PBD Engine"), PBDProcess))
         throw(QString("Mechanics::initialize Cannot make PBD Engine") +
               parm("Mechanical Solver Process"));
     if(!getProcess(parm("Tissue Process"), tissueProcess))
-        throw(QString("Chemicals::initialize Cannot make Tissue Process:") +
+        throw(QString("Mechanics::initialize Cannot make Tissue Process:") +
               parm("Tissue Process"));
-
+    if(!getProcess(parm("Set Global Attr Process"), setGlobalAttrProcess))
+        throw(QString("Mechanics::initialize Cannot make Set Global Attr Process:") +
+              parm("Set Global Attr Process"));
     Verbose = parm("Verbose") == "True";
 
     if(Verbose)
@@ -28,10 +32,6 @@ bool Mechanics::initialize(QWidget* parent) {
 
     PBDProcess->initialize(parent);
 
-    wallStress = parm("Wall stress").toDouble();
-    wallStressK1 = parm("Wall stress K1").toDouble();
-    wallStressK2 = parm("Wall stress K2").toDouble();
-
     // External Forces
     QStringList list = parm("Gravity Direction").split(QRegExp(","));
     gravity[0] = list[0].toDouble();
@@ -40,13 +40,13 @@ bool Mechanics::initialize(QWidget* parent) {
     gravity *=  parm("Gravity Force").toDouble();
 
     // Hydrostatics
-     for(uint i = 0; i < cellAttr.size(); i++) {
-         auto it = cellAttr.begin();
-         advance(it, i);
-         Tissue::CellData& cD = it->second;
-         if(cD.pressureMax == -1)
+    for(uint i = 0; i < cellAttr.size(); i++) {
+        auto it = cellAttr.begin();
+        advance(it, i);
+        Tissue::CellData& cD = it->second;
+        if(cD.pressureMax == -1)
             cD.pressureMax = parm("Turgor Pressure").toDouble();
-     }
+    }
 
     return true;
 }
@@ -110,52 +110,115 @@ bool Mechanics::step() {
     Tissue::VertexDataAttr& vMAttr =
         mesh->attributes().attrMap<CCIndex, Tissue::VertexData>("VertexData");
 
-
-    // Internal Growing Forces on faces (replaced by PBD)
-    for(uint i = 0; i < cs.faces().size(); i++) {
-        CCIndex f = cs.faces()[i];
-        Tissue::FaceData& fD = faceAttr[f];
-        if (fD.type != Tissue::Membrane)
-            continue;
-        Tissue::CellData& cD = cellAttr[(*indexAttr)[f].label];
-
-        cD.wallStress = wallStress;
-
-        double auxinByArea = cD.auxin / cD.area;
-
-        fD.stress = cD.wallStress *
-                        ((pow(auxinByArea, 4)) / (pow(auxinByArea, 4) + pow(wallStressK1, 4))) *
-                        ((pow(wallStressK2, 8)) / (pow(auxinByArea, 8) + pow(wallStressK2, 8)));
-
-        fD.sigmaA = fD.stress *
-                    (
-                        (norm(fD.a1) * OuterProduct(fD.a1/norm(fD.a1), fD.a1/norm(fD.a1))) +
-                        (norm(fD.a2) * OuterProduct(fD.a2/norm(fD.a2), fD.a2/norm(fD.a2)))
-                    );
-
+    ///////// ONLY WORKS IF the root grows from top to bottom, or change the code
+    double lrc = -BIG_VAL;
+    double qc = BIG_VAL;
+    for(auto c : cellAttr) {
+        Tissue::CellData& cD = cellAttr[c.first];
+        if(cD.type == Tissue::LRC && cD.centroid.y() > lrc)
+            lrc = cD.centroid.y();
+        if(cD.type == Tissue::QC && cD.centroid.y() < qc)
+            qc = cD.centroid.y();
     }
 
     // Auxin relaxating effect on cell walls
-    double baseWallEK = parm("Wall EK").toDouble();
+    double wallEK = parm("Wall EK").toDouble();
+    double shearEK = parm("Shear EK").toDouble();
     double auxinWallK1 = parm("Auxin-induced wall relaxation K1").toDouble();
     double auxinWallK2 = parm("Auxin-induced wall relaxation K2").toDouble();
+    double auxinMinimumWallEK = parm("Auxin-relaxation Minimum Wall EK").toDouble();
+    double pressureMax = parm("Turgor Pressure").toDouble();
     double pressureK = parm("Turgor Pressure Rate").toDouble();
+    double pressureKred = parm("Turgor Pressure non-Meristem Reduction").toDouble();
+    double quasimodoK = parm("Quasimodo wall relaxation K").toDouble();
+    double ccvTIRK2 = parm("ccvTIR wall relaxation K2").toDouble();
+    QString ccvTIRtissueEK = parm("ccvTIR wall relaxation Tissue");
+
+    // Cell-wise updates
     for(auto c : cellAttr) {
             Tissue::CellData& cD = cellAttr[c.first];
-            double auxinByArea =  cD.auxin / cD.area;
-            //cD.pressure = 1 + parm("Turgor Pressure").toDouble() * norm(cD.a1) * pow(auxinByArea, 4) / ( pow(wallStressK1, 4) +  pow(auxinByArea, 4)) ;
+            // Turgor Pressure
+            if(cD.stage == 2)
+                cD.pressureMax = 1;
+            else if(cD.stage == 1)
+                cD.pressureMax = pressureMax * pressureKred;
             cD.pressure += pressureK * Dt;
             if(cD.pressure > cD.pressureMax)
                 cD.pressure = cD.pressureMax;
-            for(CCIndex e : cD.perimeterEdges) {
-                Tissue::EdgeData& eD = edgeAttr[e];
-                if(eD.type == Tissue::Wall)
-                  if(auxinWallK1 > 0)
-                        eD.eStiffness = baseWallEK *  ( pow(auxinWallK1, 4) / ( pow(auxinWallK1, 4) +  pow(auxinByArea, 4)) +
-                                                        pow(auxinByArea, 8) / ( pow(auxinWallK2, 8) +  pow(auxinByArea, 8))
-                                                        );
+            // TIR1 tissue
+            {
+                cD.is_ccvTIR1tissue = false;
+                if(ccvTIRtissueEK == "TIR1") {
+                    cD.is_ccvTIR1tissue = true;
+                } else if (ccvTIRtissueEK == "KNOLLE"){
+                    if(cD.lastDivision < 30)
+                        cD.is_ccvTIR1tissue = true;
+                } else if (ccvTIRtissueEK == "SMB"){
+                    if(cD.type == Tissue::LRC)
+                        cD.is_ccvTIR1tissue = true;
+                } else if (ccvTIRtissueEK == "GL2"){
+                    if(cD.type == Tissue::Epidermis && cD.stage == 0)
+                        cD.is_ccvTIR1tissue = true;
+                } else if (ccvTIRtissueEK == "COBL9"){
+                    if(cD.type == Tissue::Epidermis && cD.stage == 1)
+                        cD.is_ccvTIR1tissue = true;
+                } else if (ccvTIRtissueEK == "PEP" && cD.stage == 1){
+                    if(cD.type == Tissue::Cortex)
+                        cD.is_ccvTIR1tissue = true;
+                } else if (ccvTIRtissueEK == "NGR2"){
+                    if(cD.type == Tissue::Endodermis)
+                        cD.is_ccvTIR1tissue = true;
+                } else if (ccvTIRtissueEK == "SHR"){
+                    if(cD.type == Tissue::Vascular && cD.stage == 0)
+                        cD.is_ccvTIR1tissue = true;
+                } else if (ccvTIRtissueEK == "GLV5"){
+                    if(cD.type == Tissue::Columella || cD.type == Tissue::ColumellaInitial)
+                        cD.is_ccvTIR1tissue = true;
+                } else if (ccvTIRtissueEK == "PIN2"){
+                    if(cD.type == Tissue::Cortex || cD.type == Tissue::LRC || cD.type == Tissue::Epidermis)
+                        cD.is_ccvTIR1tissue = true;
+                }
             }
 
+    }
+
+    // Edge-wise updates
+    for(CCIndex e: cs.edges()) {
+        Tissue::EdgeData& eD = edgeAttr[e];
+        double stiffness = 0;
+        for(CCIndex f : cs.incidentCells(e, 2)){
+            Tissue::CellData& cD = cellAttr[(*indexAttr)[f].label];
+            if(eD.type == Tissue::Wall) {
+                eD.eStiffness = setGlobalAttrProcess->parm(QString(Tissue::ToString(cD.type)) + " Wall EK").toDouble();
+                if(eD.eStiffness == -1)
+                    eD.eStiffness = wallEK;
+            }
+            if(eD.type == Tissue::Shear) {
+                eD.eStiffness = setGlobalAttrProcess->parm(QString(Tissue::ToString(cD.type)) + " Shear EK").toDouble();
+                if(eD.eStiffness == -1)
+                    eD.eStiffness = shearEK;
+            }
+            double face_stiffness = eD.eStiffness;
+            if(eD.type == Tissue::Wall) {
+                double auxinByArea =  cD.auxin / cD.area;
+                if(auxinWallK1 > 0) {
+                    double K2 = auxinWallK2;
+                    if(cD.is_ccvTIR1tissue && ccvTIRK2 > 0)
+                        K2 = ccvTIRK2;
+                    face_stiffness *=  ( pow(auxinWallK1, 4) / ( pow(auxinWallK1, 4) +  pow(auxinByArea, 4)) +
+                                                                pow(auxinByArea, 8) / ( pow(K2, 8) +  pow(auxinByArea, 8))
+                                                                );
+                if(face_stiffness < auxinMinimumWallEK)
+                        face_stiffness = auxinMinimumWallEK;
+
+                }
+                if(quasimodoK > 0)
+                    face_stiffness *= exp(-quasimodoK * cD.quasimodo);
+            }
+            stiffness += face_stiffness;
+        }
+        stiffness /= cs.incidentCells(e, 2).size();
+        eD.eStiffness = stiffness;
     }
 
     // Apply external/internal forces on vertices
@@ -185,6 +248,7 @@ bool Mechanics::step() {
     if(growthRatesVector.size() > 30)
         growthRatesVector.erase(growthRatesVector.begin());
 
+    // Debugs
     if(++debug_step > parm("Debug Steps").toInt()) {
         double rootGR = 0;
         for(double gr : growthRatesVector)
@@ -212,7 +276,7 @@ Point3d Mechanics::calcForcesFace(CCIndex f,
     Tissue::CellData& cD, Tissue::FaceData& fD, Tissue::EdgeData& eD, Tissue::VertexData& vD ) {
     Point3d dx;
 
-    // Hydrostatics
+    // Hydrostatics (replaced by PBD)
     /*
     if(eD.type == Tissue::Wall) {
         eD.pressureForce = cD.pressure * eD.outwardNormal[f] * eD.length;
@@ -223,51 +287,16 @@ Point3d Mechanics::calcForcesFace(CCIndex f,
         eD.pressureForce = 0;
     */
 
-    // Viscous Forces
-    eD.sigmaForce = Point3d(0, 0, 0);
-    // viscosity only active on wall edges
-    if(eD.type == Tissue::Wall) {
-            eD.sigmaForce = fD.sigmaA * eD.outwardNormal[f] * eD.length;
-            vD.forces.push_back(make_tuple(cD.label, "sigmaAY", 0.5 * eD.sigmaForce));
-            dx += 0.5 * eD.sigmaForce;
-    }
     return dx;
 }
 
-// this function computes the force acting on the vtx v as member of the edge e.
-// Its connected vtx n, with an eventual label to identify the cell exterting
-// the force (0 if wall edge)
 Point3d Mechanics::calcForcesEdge(
     const CCStructure& cs, const CCIndexDataAttr& indexAttr, CCIndex e, CCIndex v, int label) {
     Mesh* mesh = getMesh("Mesh 1");
     if(!mesh)
         throw(QString("MechanicalGrowth::step No current mesh"));
 
-    Tissue::VertexDataAttr& vMAttr =
-        mesh->attributes().attrMap<CCIndex, Tissue::VertexData>("VertexData");
-    Tissue::EdgeDataAttr& edgeAttr =
-        mesh->attributes().attrMap<CCIndex, Tissue::EdgeData>("EdgeData");
-
-    Tissue::EdgeData& eD = edgeAttr[e];
-    Tissue::VertexData& vD = vMAttr[v];
     Point3d dx;
-    auto eb = cs.edgeBounds(e);
-    Point3d vPos = indexAttr[v].pos, nPos;
-    if(eb.first == v)
-        nPos = indexAttr[eb.second].pos;
-    else
-        nPos = indexAttr[eb.first].pos;
-
-    // Mass Springs
-    Point3d sigmaEeforce = eD.sigmaEe * ((vPos - nPos) / eD.length);
-    vD.forces.push_back(make_tuple(label, "sigmaEe", sigmaEeforce));
-    dx += sigmaEeforce;
-
-    // Viscous Forces
-    Point3d sigmaEvforce = eD.sigmaEv * ((vPos - nPos) / eD.length);
-    vD.forces.push_back(make_tuple(label, "sigmaEv", sigmaEvforce));
-    dx += sigmaEvforce;
-
     return dx;
 }
 
@@ -400,7 +429,7 @@ bool MechanicalGrowth::step(double Dt) {
     for(uint i = 0; i < cellAttr.size(); i++) {
         auto it = cellAttr.begin();
         advance(it, i);
-        Tissue::CellData& cD = it->second;        
+        Tissue::CellData& cD = it->second;
         if(cD.mfRORate != 0)
             cD.mfDelete = parm("MF Delete After Division") == "True";
         if(norm(cD.a1) == 0)
@@ -442,13 +471,7 @@ bool MechanicalGrowth::step(double Dt) {
                     a1_inc = Rotate(Point3d(cD.gMax,0,0), cD.gAngle);
                 if(cD.gMin > threshold)
                     a2_inc = Rotate(Point3d(cD.gMin,0,0), cD.gAngle+(M_PI/2));
-            } else if (parm("Strain Tensor") == "Shape Strain Tensor") {
-                if(cD.sMax > threshold)
-                    a1_inc = Rotate(Point3d(cD.sMax,0,0), cD.sAngle);
-                if(cD.sMin > threshold)
-                    a2_inc = Rotate(Point3d(cD.sMin,0,0), cD.sAngle+(M_PI/2));
-            } else
-                 throw(QString("Wrong Tensor"));
+            }
         // Cell Axis method
         } else if(parm("Polarity Method") == "Cell Axis") {
             if(cD.mfRORate > 0) {
@@ -498,12 +521,12 @@ bool MechanicalGrowth::step(double Dt) {
             cD.a1 = cD.a2;
             cD.a2 = tmp;
         }
-
+        // Avoid zeros?
         if(norm(cD.a1) == 0)
             cD.a1[1] = EPS;
         if(norm(cD.a2) == 0)
             cD.a2[0] = EPS;
-
+        // For visuals on faces
         for(CCIndex f : (*cD.cellFaces)) {
             Tissue::FaceData& fD = faceAttr[f];
             fD.a1 = cD.a1;
@@ -524,36 +547,107 @@ bool MechanicalGrowth::step(double Dt) {
 
     }
 
-    // Find the highest LRC cell (used later for zonation, to see how fare the cells are from the QC)
+    // Find the highest LRC cell (used later for zonation, to see how far the cells are from the QC)
+    ///////// ONLY WORKS IF the root grows from top to bottom, or change the code
     double lrc = -BIG_VAL;
+    //uint epidermis_count = -BIG_VAL;
+    Point3d qc = Point3d(0,0,0);
+    Point3d source = Point3d(0,0,0); int source_cell = 0;
     for(auto c : cellAttr) {
         Tissue::CellData& cD = cellAttr[c.first];
         if(cD.type == Tissue::LRC && cD.centroid.y() > lrc)
             lrc = cD.centroid.y();
+        if(cD.type == Tissue::QC)
+            qc += cD.centroid;
+        if(cD.type == Tissue::Source) {
+            source += cD.centroid;
+            source_cell++;
+        }
     }
+    qc /= 2; source /= source_cell;
 
     // Zonation and Resting values update
     double growthRateThresh = parm("Strain Threshold for Growth").toDouble();
     double wallsMaxGrowthRate = parm("Walls Growth Rate").toDouble();
+    bool preventElengation = parm("Prevent Cell Elongation") == "True";
     double elongationZone = parm("Elongation Zone").toDouble();
-    double differentatiationZone = parm("Differentiation Zone").toDouble();
+    double differentiationZone = parm("Differentiation Zone").toDouble();
+    QString brassinoControl = parm("Brassinosteroids Control");
+    QString auxinControl = parm("Auxin Control on Growth");
+    double auxinK = parm("Auxin inhibition on growth").toDouble();
+    double ccvTIRK = parm("ccvTIR inhibition on growth").toDouble();
+    QString ccvTIRtissueGR = parm("ccvTIR growth Tissue");
     for(auto c : cellAttr) {
         Tissue::CellData& cD = cellAttr[c.first];
         cD.lifeTime += Dt;
-        // Zonation
-        if(lrc != -BIG_VAL && elongationZone > 0 && differentatiationZone > 0 && elongationZone < differentatiationZone) {
-            if(cD.centroid.y() - lrc >  elongationZone)
-                cD.divisionAllowed = false;
-            if(cD.centroid.y() - lrc >  differentatiationZone)
-                cD.pressureMax = 1;
+        // Zonation, I assume that the root is at least some size
+        if(norm(source - qc) > 200/* && elongationZone > 0 && differentiationZone > 0 && elongationZone < differentiationZone*/) {
+            double dist = cD.centroid.y() - lrc;
+            if(cD.stage == 0 && elongationZone > 0 && dist > elongationZone)
+                cD.stage = 1;
+            if(cD.stage == 1 && cD.lifeTime > differentiationZone/*dist >  differentiationZone*/)
+                cD.stage = 2;
         }
+        cD.growthSignal = 1;
+
+        // Auxin control on wall growth
+        if(auxinControl == "True") {
+            // Default auxin control on growth
+            double K = auxinK;
+            // TIR1 tissue
+            {
+                cD.is_ccvTIR1tissue = false;
+                if(ccvTIRtissueGR == "TIR1") {
+                    cD.is_ccvTIR1tissue = true;
+                } else if (ccvTIRtissueGR == "KNOLLE"){
+                    if(cD.lastDivision < 30)
+                        cD.is_ccvTIR1tissue = true;
+                } else if (ccvTIRtissueGR == "SMB"){
+                    if(cD.type == Tissue::LRC)
+                        cD.is_ccvTIR1tissue = true;
+                } else if (ccvTIRtissueGR == "GL2"){
+                    if(cD.type == Tissue::Epidermis && cD.stage == 0)
+                        cD.is_ccvTIR1tissue = true;
+                } else if (ccvTIRtissueGR == "COBL9"){
+                    if(cD.type == Tissue::Epidermis && cD.stage == 1)
+                        cD.is_ccvTIR1tissue = true;
+                } else if (ccvTIRtissueGR == "PEP"){
+                    if(cD.type == Tissue::Cortex && cD.stage == 1)
+                        cD.is_ccvTIR1tissue = true;
+                } else if (ccvTIRtissueGR == "NGR2"){
+                    if(cD.type == Tissue::Endodermis)
+                        cD.is_ccvTIR1tissue = true;
+                } else if (ccvTIRtissueGR == "SHR"){
+                    if(cD.type == Tissue::Vascular && cD.stage == 0)
+                        cD.is_ccvTIR1tissue = true;
+                } else if (ccvTIRtissueGR == "GLV5"){
+                    if(cD.type == Tissue::Columella || cD.type == Tissue::ColumellaInitial)
+                        cD.is_ccvTIR1tissue = true;
+                } else if (ccvTIRtissueGR == "PIN2"){
+                    if(cD.type == Tissue::Cortex || cD.type == Tissue::LRC || cD.type == Tissue::Epidermis)
+                        cD.is_ccvTIR1tissue = true;
+                }
+            }
+            // Replace auxin control on growth with ccv if set
+            if(cD.is_ccvTIR1tissue && ccvTIRK > 0)
+                K = ccvTIRK;
+            cD.growthSignal *= pow(K, 4) / (pow(K, 4) + pow(cD.auxin/cD.area, 4)) ;
+        }
+
+        // Brassinosteroids control on wall growth
+        if(brassinoControl == "True") {
+            cD.growthSignal *= cD.brassinosteroids * cD.brassinosteroidSignal;
+        }
+
+
         // Growth rates, rest lengths....
         // Disable growth update if this variable is zero, for debugging mostly
         if(cD.mfRORate == 0)
             continue;  ///
         // Disable growth update if cell division is not allowed (Crisanto's root) and we have reached max cell size
-        if(!cD.divisionAllowed && cD.area > cD.cellMaxArea)
-            continue;
+        if(preventElengation)
+            if(!cD.divisionAllowed && cD.area > cD.cellMaxArea)
+                continue;
         if(cD.growthRate > growthRateThresh)
             //cD.restArea += cD.area * areaMaxGrowthRate * Dt;
             cD.restArea = cD.area;
@@ -565,15 +659,20 @@ bool MechanicalGrowth::step(double Dt) {
             for(CCIndex e : cs.incidentCells(f, 1)) {
                 Tissue::EdgeData& eD = edgeAttr[e];
                 if(eD.type == Tissue::Wall) {
-                    if(eD.strain >= growthRateThresh && cD.growthRate > growthRateThresh) {
-                        //eD.restLength = eD.length;
-                        double strainDiff = eD.strain - growthRateThresh;
-                        eD.restLength += wallsMaxGrowthRate * strainDiff * Dt;
-                        if( eD.restLength > eD.length) {
-                            mdxInfo << "WARNING: restLength is updated inmediately" << endl;
-                            eD.restLength = eD.length;
+                        if(eD.strain >= growthRateThresh && cD.growthRate > growthRateThresh) {
+                            //eD.restLength = eD.length;
+                            double strainDiff = eD.strain - growthRateThresh;
+                            eD.updateRate = cD.wallsMaxGR;
+                            if(eD.updateRate == -1)
+                                eD.updateRate = wallsMaxGrowthRate;
+                            eD.updateRate *= cD.growthSignal * strainDiff * Dt;
+                            eD.restLength += eD.updateRate;
+                            if( eD.restLength > eD.length) {
+                                mdxInfo << "WARNING: restLength is updated inmediately" << endl;
+                                eD.restLength = eD.length;
+                            }
                         }
-                    }
+
                 } else if (eD.type == Tissue::Shear)
                     //if(eD.length > eD.restLength) // this seems to have very little effect
                     eD.restLength = eD.length ;
@@ -589,18 +688,24 @@ bool MechanicalGrowth::step(double Dt) {
             cD.divAlg = 2;
             if(cD.area < cD.cellMaxArea)
                 synchronized = false;
+            else
+                synchronized = true;
         }
     }
+
+
+    // disabled?
+    /*
     for(auto c : cellAttr) {
         Tissue::CellData& cD = cellAttr[c.first];
         if(cD.type == Tissue::ColumellaInitial || (cD.type == Tissue::EpLrcInitial  && cD.periclinalDivision)) {
             if(synchronized)
                 cD.divisionAllowed = true;
             else
-                cD.divisionAllowed = true;  ///////// disabled
+                cD.divisionAllowed = false;
         }
     }
-
+    */
     return false;
 }
 
@@ -784,7 +889,6 @@ void Chemicals::calcDerivsCell(const CCStructure& cs,
     double AUX1MaxEdge = cD.aux1MaxEdge;
     for(CCIndex vn : csDual.neighbors(cD.dualVertex)) {
         for(CCIndex e : tissueProcess->wallEdges[std::make_pair(label, indexAttr[vn].label)]) {
-    //for(CCIndex e : cD.perimeterEdges){{
             Tissue::EdgeData& eD = edgeAttr[e];
             double Aux1Sensitivity = eD.length / cD.perimeter;
             double traffickedAUX1 = AUX1Krate * Aux1Sensitivity * cD.Aux1
@@ -822,9 +926,10 @@ void Chemicals::calcDerivsCell(const CCStructure& cs,
     double pinCytDecayRate = parm("Pin1 Cytoplasmic Decay Rate").toDouble();
     double pinMemDecayRate = parm("Pin1 Membrane Max Decay Rate").toDouble();
     double pinMaxEdge = parm("Pin1 Max Amount Edge").toDouble();
+    double pinLateralization = parm("Pin Lateralization").toDouble();
+    double lateralized_pins = 0;
     for(CCIndex vn : csDual.neighbors(cD.dualVertex)) {
         for(CCIndex e : tissueProcess->wallEdges[std::make_pair(label, indexAttr[vn].label)]) {
-    //for(CCIndex e : cD.perimeterEdges){{
             Tissue::EdgeData& eD = edgeAttr[e];
             double traffickedPin1 = Krate * eD.pin1Sensitivity[label] * cD.Pin1
                      * (pow(pinMaxEdge,10) / (pow(pinMaxEdge,10) + pow(eD.Pin1[label]/eD.length,10)));
@@ -832,13 +937,24 @@ void Chemicals::calcDerivsCell(const CCStructure& cs,
             double decayedPin1 = eD.Pin1[label]
                     *  (pinCytDecayRate + (pinMemDecayRate - pinCytDecayRate) *
                         (
-                            //(1 / pow(cD.auxin/cD.area, 10) +  1))
-                            1 / (10 + 1)   //// FIXME no regulated coefficient 10 here
+                            (1 + 0.1)
                           + (pow(0.01, 10) / (pow(eD.pin1Sensitivity[label], 10) +  pow(0.01, 10))) //// FIXME no regulated coefficient 0.01 here
                         )
                        );
             eD.Pin1[label] += (traffickedPin1 - decayedPin1) * Dt;
             cD.Pin1 -= traffickedPin1 * Dt;
+            // Lateralization
+            if(pinLateralization && cD.type != Tissue::Source)
+                    for(CCIndex en : getBoundEdges(cs, e)) {
+                        Tissue::EdgeData& eDn = edgeAttr[en];
+                        if(eDn.type == Tissue::Wall && !cs.onBorder(en)) {
+                            double lateralizedPin = pinLateralization * (eD.Pin1[label] - eDn.Pin1[label]) * Dt;
+                            eD.Pin1[label] -= lateralizedPin;
+                            eDn.Pin1[label] += lateralizedPin;
+                            lateralized_pins += lateralizedPin;
+                        }
+                    }
+
             debugs["Average PIN1 Trafficking"] += traffickedPin1 * Dt;
         }
     }
@@ -866,112 +982,110 @@ void Chemicals::calcDerivsCell(const CCStructure& cs,
     double MF_PP2A_Relief_K = parm("MF-PP2A Relief K").toDouble();
     double PINOIDdilutionRate = parm("PINOID Dilution Rate").toDouble();
     double PP2AdilutionRate = parm("PP2A Dilution Rate").toDouble();
-
     double trafficked_PINOID_total = 0, trafficked_PP2A_total = 0;
     double disassociated_PINOID_total = 0, disassociated_PP2A_total = 0;
-    /*for(CCIndex vn : csDual.neighbors(cD.dualVertex)) {
-        for(CCIndex e : tissueProcess->wallEdges[std::make_pair(label, indexAttr[vn].label)]) {*/
-    for(CCIndex e : cD.perimeterEdges){{
-            Tissue::EdgeData& eD = edgeAttr[e];
-            double PINOID_conc_eD = eD.PINOID[label] / eD.length;
-            double PP2A_conc_eD = eD.PP2A[label] / eD.length;
-            double auxin_ratio = eD.auxinGrad[label] > 0 ? eD.auxinGrad[label] : 0;
-            // exocytosis
-            double trafficked_PINOID = Dt * cD.PINOID
-                        * PINOIDKrate * (eD.length / cD.perimeter) // equal trafficking for edge
-                        * (pow(cD.auxin / cD.area, 2) / (pow(0.01, 2) + pow(cD.auxin / cD.area, 2))) // auxin promotes trafficking
-                        * (pow(PINOIDMaxEdge,10) / (pow(PINOIDMaxEdge,10) + pow(PINOID_conc_eD,10))) // Max amount on edge
-                        ;
-            double trafficked_PP2A = Dt * cD.PP2A * (eD.length / cD.perimeter)
-                        * (  // not equal trafficking for edge
-                           PP2AKrate +
-                           AUXIN_PP2A_Relief_T * (pow(auxin_ratio, 4) / (pow(auxin_ratio, 4) + pow(AUXIN_PP2A_Relief_K, 4))) +
-                           Geom_PP2A_Relief_T * (pow(1-eD.geomImpact[label], 4) / (pow(1-eD.geomImpact[label], 4) + pow(1-Geom_PP2A_Relief_K, 4))) +
-                           MF_PP2A_Relief_T * (pow(1-eD.MFImpact[label], 4) / (pow(1-eD.MFImpact[label], 4) + pow(1-MF_PP2A_Relief_K, 4)))
-                          )
-                        * (pow(PINOID_PP2A_Trafficking_Toggle_K, 8) / (pow(PINOID_PP2A_Trafficking_Toggle_K, 8) + pow(PINOID_conc_eD, 8))) // not used
-                        * (pow(cD.auxin / cD.area, 2) / (pow(0.01, 2) + pow(cD.auxin / cD.area, 2))) // auxin promotes trafficking
-                        * (pow(PP2AMaxEdge,10) / (pow(PP2AMaxEdge,10) + pow(PP2A_conc_eD,10))) // Max amount on edge
-                      ;
-            trafficked_PINOID_total += trafficked_PINOID;
-            trafficked_PP2A_total += trafficked_PP2A;
+    if(parm("Auxin Polarity Method") == "PINOID") // avoid entering the loop if not the selected method
+        for(CCIndex e : cD.perimeterEdges){{
+                Tissue::EdgeData& eD = edgeAttr[e];
+                double PINOID_conc_eD = eD.PINOID[label] / eD.length;
+                double PP2A_conc_eD = eD.PP2A[label] / eD.length;
+                double auxin_ratio = eD.auxinGrad[label] > 0 ? eD.auxinGrad[label] : 0;
+                // exocytosis
+                double trafficked_PINOID = Dt * cD.PINOID
+                            * PINOIDKrate * (eD.length / cD.perimeter) // equal trafficking for edge
+                            * (pow(cD.auxin / cD.area, 2) / (pow(0.01, 2) + pow(cD.auxin / cD.area, 2))) // auxin promotes trafficking
+                            * (pow(PINOIDMaxEdge,10) / (pow(PINOIDMaxEdge,10) + pow(PINOID_conc_eD,10))) // Max amount on edge
+                            ;
+                double trafficked_PP2A = Dt * cD.PP2A * (eD.length / cD.perimeter)
+                            * (  // not equal trafficking for edge
+                               PP2AKrate +
+                               AUXIN_PP2A_Relief_T * (pow(auxin_ratio, 4) / (pow(auxin_ratio, 4) + pow(AUXIN_PP2A_Relief_K, 4))) +
+                               Geom_PP2A_Relief_T * (pow(1-eD.geomImpact[label], 4) / (pow(1-eD.geomImpact[label], 4) + pow(1-Geom_PP2A_Relief_K, 4))) +
+                               MF_PP2A_Relief_T * (pow(1-eD.MFImpact[label], 4) / (pow(1-eD.MFImpact[label], 4) + pow(1-MF_PP2A_Relief_K, 4)))
+                              )
+                            * (pow(PINOID_PP2A_Trafficking_Toggle_K, 8) / (pow(PINOID_PP2A_Trafficking_Toggle_K, 8) + pow(PINOID_conc_eD, 8))) // not used
+                            * (pow(cD.auxin / cD.area, 2) / (pow(0.01, 2) + pow(cD.auxin / cD.area, 2))) // auxin promotes trafficking
+                            * (pow(PP2AMaxEdge,10) / (pow(PP2AMaxEdge,10) + pow(PP2A_conc_eD,10))) // Max amount on edge
+                          ;
+                trafficked_PINOID_total += trafficked_PINOID;
+                trafficked_PP2A_total += trafficked_PP2A;
 
-            double disassociated_PINOID = 0;
-            double disassociated_PP2A = Dt * eD.PP2A[label]
-                        * (pow(PINOID_conc_eD, 8) / (pow(PINOID_PP2A_Disassociation_Toggle_K, 8) + pow(PINOID_conc_eD, 8)))
-                      ;
-            disassociated_PINOID_total += disassociated_PINOID;
-            disassociated_PP2A_total += disassociated_PP2A;
+                double disassociated_PINOID = 0;
+                double disassociated_PP2A = Dt * eD.PP2A[label]
+                            * (pow(PINOID_conc_eD, 8) / (pow(PINOID_PP2A_Disassociation_Toggle_K, 8) + pow(PINOID_conc_eD, 8)))
+                          ;
+                disassociated_PINOID_total += disassociated_PINOID;
+                disassociated_PP2A_total += disassociated_PP2A;
 
-            std::vector<CCIndex>::iterator it = std::find(cD.perimeterEdges.begin(), cD.perimeterEdges.end(), e);
-            int curr_index = std::distance(cD.perimeterEdges.begin(), it);
-            int next_index = curr_index + 1;
-            int prev_index = curr_index - 1;
-            if((uint)next_index == cD.perimeterEdges.size())
-                next_index = 0;
-            if(prev_index == -1)
-                prev_index = cD.perimeterEdges.size() - 1;
-            CCIndex en = cD.perimeterEdges[next_index];
-            CCIndex ep = cD.perimeterEdges[prev_index];
-            Tissue::EdgeData& eDn = edgeAttr[en];
-            Tissue::EdgeData& eDp = edgeAttr[ep];
-            double PP2A_conc_eDn = eDn.PP2A[label] / eDn.length;
-            double PP2A_conc_eDp = eDp.PP2A[label] / eDp.length;
-            double PINOID_conc_eDn = eDn.PINOID[label] / eDn.length;
-            double PINOID_conc_eDp = eDp.PINOID[label] / eDp.length;
+                std::vector<CCIndex>::iterator it = std::find(cD.perimeterEdges.begin(), cD.perimeterEdges.end(), e);
+                int curr_index = std::distance(cD.perimeterEdges.begin(), it);
+                int next_index = curr_index + 1;
+                int prev_index = curr_index - 1;
+                if((uint)next_index == cD.perimeterEdges.size())
+                    next_index = 0;
+                if(prev_index == -1)
+                    prev_index = cD.perimeterEdges.size() - 1;
+                CCIndex en = cD.perimeterEdges[next_index];
+                CCIndex ep = cD.perimeterEdges[prev_index];
+                Tissue::EdgeData& eDn = edgeAttr[en];
+                Tissue::EdgeData& eDp = edgeAttr[ep];
+                double PP2A_conc_eDn = eDn.PP2A[label] / eDn.length;
+                double PP2A_conc_eDp = eDp.PP2A[label] / eDp.length;
+                double PINOID_conc_eDn = eDn.PINOID[label] / eDn.length;
+                double PINOID_conc_eDp = eDp.PINOID[label] / eDp.length;
 
-            // Dilution
-            double dilution_PINOID_n = 0;
-            double dilution_PP2A_n = 0;
-            double dilution_PINOID_p = 0;
-            double dilution_PP2A_p = 0;
-            //if(!cs.onBorder(en))
-            {
-                 dilution_PINOID_n = PINOIDdilutionRate * (PINOID_conc_eD - PINOID_conc_eDn)  * Dt;
-                 dilution_PP2A_n = PP2AdilutionRate * (PP2A_conc_eD - PP2A_conc_eDn)  * Dt;
-            }
-            //if(!cs.onBorder(ep))
-            {
-                dilution_PINOID_p = PINOIDdilutionRate * (PINOID_conc_eD - PINOID_conc_eDp)  * Dt;
-                dilution_PP2A_p = PP2AdilutionRate * (PP2A_conc_eD - PP2A_conc_eDp)  * Dt;
-            }
-            eD.PP2A[label] -= dilution_PP2A_n + dilution_PP2A_p;
-            eD.PINOID[label] -=  dilution_PINOID_n + dilution_PINOID_p;
-            eDn.PP2A[label] += dilution_PP2A_n;
-            eDn.PINOID[label] += dilution_PINOID_n;
-            eDp.PP2A[label] += dilution_PP2A_p;
-            eDp.PINOID[label] += dilution_PINOID_p;
-
-            CCIndex ec;
-            /*if(cs.onBorder(en))
-                ec = ep;
-            else if (cs.onBorder(ep))
-                ec = en;
-            else*/
-                ec = (rand() > RAND_MAX/2) ? en : ep;
-            Tissue::EdgeData& eDc = edgeAttr[ec];
-
-            double PP2A_conc_eDc = eDc.PP2A[label] / eDc.length;
-            double PINOID_conc_eDc = eDc.PINOID[label] / eDc.length;
-
-            // PINOIDS moving toward the lowest
-            if(abs(PP2A_conc_eDc - PP2A_conc_eD ) > EPS){
-                if(PP2A_conc_eDc <= PP2A_conc_eD || rand() < PINOID_fluidity_K * RAND_MAX * (PP2A_conc_eD / (PP2A_conc_eDc + EPS))) {
-                      double disp_PINOID = PINOID_disp_K / (eD.length + eDc.length) * eD.PINOID[label] * Dt;
-                      disp_PINOID *= (pow(PINOIDMaxEdge,10) / (pow(PINOIDMaxEdge,10) + pow(PINOID_conc_eDc,10))); // Max amount on edge
-                      eDc.PINOID[label] += disp_PINOID;
-                      eD.PINOID[label] -= disp_PINOID;
+                // Dilution
+                double dilution_PINOID_n = 0;
+                double dilution_PP2A_n = 0;
+                double dilution_PINOID_p = 0;
+                double dilution_PP2A_p = 0;
+                //if(!cs.onBorder(en))
+                {
+                     dilution_PINOID_n = PINOIDdilutionRate * (PINOID_conc_eD - PINOID_conc_eDn)  * Dt;
+                     dilution_PP2A_n = PP2AdilutionRate * (PP2A_conc_eD - PP2A_conc_eDn)  * Dt;
                 }
+                //if(!cs.onBorder(ep))
+                {
+                    dilution_PINOID_p = PINOIDdilutionRate * (PINOID_conc_eD - PINOID_conc_eDp)  * Dt;
+                    dilution_PP2A_p = PP2AdilutionRate * (PP2A_conc_eD - PP2A_conc_eDp)  * Dt;
+                }
+                eD.PP2A[label] -= dilution_PP2A_n + dilution_PP2A_p;
+                eD.PINOID[label] -=  dilution_PINOID_n + dilution_PINOID_p;
+                eDn.PP2A[label] += dilution_PP2A_n;
+                eDn.PINOID[label] += dilution_PINOID_n;
+                eDp.PP2A[label] += dilution_PP2A_p;
+                eDp.PINOID[label] += dilution_PINOID_p;
+
+                CCIndex ec;
+                /*if(cs.onBorder(en))
+                    ec = ep;
+                else if (cs.onBorder(ep))
+                    ec = en;
+                else*/
+                    ec = (rand() > RAND_MAX/2) ? en : ep;
+                Tissue::EdgeData& eDc = edgeAttr[ec];
+
+                double PP2A_conc_eDc = eDc.PP2A[label] / eDc.length;
+                double PINOID_conc_eDc = eDc.PINOID[label] / eDc.length;
+
+                // PINOIDS moving toward the lowest
+                if(abs(PP2A_conc_eDc - PP2A_conc_eD ) > EPS){
+                    if(PP2A_conc_eDc <= PP2A_conc_eD || rand() < PINOID_fluidity_K * RAND_MAX * (PP2A_conc_eD / (PP2A_conc_eDc + EPS))) {
+                          double disp_PINOID = PINOID_disp_K / (eD.length + eDc.length) * eD.PINOID[label] * Dt;
+                          disp_PINOID *= (pow(PINOIDMaxEdge,10) / (pow(PINOIDMaxEdge,10) + pow(PINOID_conc_eDc,10))); // Max amount on edge
+                          eDc.PINOID[label] += disp_PINOID;
+                          eD.PINOID[label] -= disp_PINOID;
+                    }
+                }
+
+                // decay
+                double decayedPINOID = Dt * eD.PINOID[label] * PINOIDdecayRate;
+                double decayedPP2A = Dt * eD.PP2A[label] * PP2AdecayRate;
+                eD.PP2A[label] += trafficked_PP2A - disassociated_PP2A - decayedPP2A;
+                eD.PINOID[label] += trafficked_PINOID -  disassociated_PINOID - decayedPINOID;
+
             }
-
-            // decay
-            double decayedPINOID = Dt * eD.PINOID[label] * PINOIDdecayRate;
-            double decayedPP2A = Dt * eD.PP2A[label] * PP2AdecayRate;
-            eD.PP2A[label] += trafficked_PP2A - disassociated_PP2A - decayedPP2A;
-            eD.PINOID[label] += trafficked_PINOID -  disassociated_PINOID - decayedPINOID;
-
         }
-    }
     double PINOIDbasalProduction = PINOIDbasalProductionRate * Dt;
     double PP2AbasalProduction = PP2AbasalProductionRate * Dt;
     double PINOIDdecay = PINOIDdecayRate * cD.PINOID * Dt;
@@ -979,29 +1093,31 @@ void Chemicals::calcDerivsCell(const CCStructure& cs,
     cD.PINOID += PINOIDbasalProduction - trafficked_PINOID_total + disassociated_PINOID_total - PINOIDdecay;
     cD.PP2A += PP2AbasalProduction - trafficked_PP2A_total + disassociated_PP2A_total - PP2Adecay;
 
+    //// BEGIN Crisanto's stuff
     // Division Inhibitor and Promoter
     double divInhibitorPermeability = parm("Division Inhibitor Permeability").toDouble();
     double divPromoterPermeability = parm("Division Promoter Permeability").toDouble();
-    for(CCIndex vn : csDual.neighbors(cD.dualVertex)) {
-        int labeln = indexAttr[vn].label;
-        Tissue::CellData& cDn = cellAttr[labeln];
-        for(CCIndex e : tissueProcess->wallEdges[std::make_pair(label, labeln)]) {
-            Tissue::EdgeData& eD = edgeAttr[e];
-            double inhibitorDiffusion = 0.5 * divInhibitorPermeability * eD.length * (cDn.divInhibitor/cDn.area - cD.divInhibitor/cD.area)  ;
-            cD.divInhibitor += inhibitorDiffusion * Dt;
-            cDn.divInhibitor -= inhibitorDiffusion * Dt;
-            double promoterDiffusion = 0.5 * divPromoterPermeability * eD.length * (cDn.divPromoter/cDn.area - cD.divPromoter/cD.area)   ;
-            cD.divPromoter += promoterDiffusion * Dt;
-            cDn.divPromoter -= promoterDiffusion * Dt;
+    if(divInhibitorPermeability > 0 || divPromoterPermeability > 0) // avoid entering this loop if disabled
+        for(CCIndex vn : csDual.neighbors(cD.dualVertex)) {
+            int labeln = indexAttr[vn].label;
+            Tissue::CellData& cDn = cellAttr[labeln];
+            for(CCIndex e : tissueProcess->wallEdges[std::make_pair(label, labeln)]) {
+                Tissue::EdgeData& eD = edgeAttr[e];
+                double inhibitorDiffusion = 0.5 * divInhibitorPermeability * eD.length * (cDn.divInhibitor/cDn.area - cD.divInhibitor/cD.area)  ;
+                cD.divInhibitor += inhibitorDiffusion * Dt;
+                cDn.divInhibitor -= inhibitorDiffusion * Dt;
+                double promoterDiffusion = 0.5 * divPromoterPermeability * eD.length * (cDn.divPromoter/cDn.area - cD.divPromoter/cD.area)   ;
+                cD.divPromoter += promoterDiffusion * Dt;
+                cDn.divPromoter -= promoterDiffusion * Dt;
+            }
         }
-    }
     // Promoter
     double divBase = parm("Division Promoter Basal Production Rate").toDouble();
     double divKmax = parm("Division Promoter Max Auxin-induced Expression").toDouble();
     double divK = parm("Division Promoter Half-max Auxin-induced K").toDouble();
     int divN = parm("Division Promoter Half-max Auxin-induced n").toInt();
     double divInduced = 0;
-    if(cD.divPromoter/cD.area < 5)
+    if(cD.divPromoter/cD.area < 5) // ???
         if(cD.type == Tissue::QC || cD.type == Tissue::ColumellaInitial || cD.type == Tissue::VascularInitial || cD.type == Tissue::CEI || cD.type == Tissue::CEID || cD.type == Tissue::Columella || cD.type == Tissue::EpLrcInitial)
             divInduced = divKmax *
                                     (
@@ -1009,35 +1125,130 @@ void Chemicals::calcDerivsCell(const CCStructure& cs,
                                      //(pow(AUX1max, 8) / (pow(AUX1max, 8) + pow(cD.Aux1 / cD.area, 8)))
                                     );
     double divDecay = cD.divPromoter * parm("Division Promoter Decay Rate").toDouble();
-    cD.divPromoter += (divBase - divDecay + divInduced) * Dt;
+    cD.divPromoter += (divBase * cD.area - divDecay + divInduced) * Dt; // divInduced should be also multiplied by area to homogenize the signal, but I don't want tu rerun everything
     // Inhibitor
     divBase = parm("Division Inhibitor Basal Production Rate").toDouble();
     divKmax = parm("Division Inhibitor Max Promoter-induced Expression").toDouble();
     divK = parm("Division Inhibitor Half-max Promoter-induced K").toDouble();
     divN = parm("Division Inhibitor Half-max Promoter-induced n").toInt();
     divInduced = 0;
-    if(cD.divInhibitor/cD.area < 5)
+    if(cD.divInhibitor/cD.area < 5) 
         //if(cD.type == Tissue::QC || cD.type == Tissue::ColumellaInitial || cD.type == Tissue::VascularInitial || cD.type == Tissue::CEI || cD.type == Tissue::CEID || cD.type == Tissue::Columella || cD.type == Tissue::EpLrcInitial)
             divInduced = divKmax *
                                     (
                                      (pow(cD.divPromoter / cD.area, divN) / (pow(divK, divN) + pow(cD.divPromoter / cD.area, divN)))
                                      //(pow(AUX1max, 8) / (pow(AUX1max, 8) + pow(cD.Aux1 / cD.area, 8)))
                                     );
+
+    //divInduced =  divInduced * cD.area / 20; // necessary to homogenize the chemical (otherwise it looks patchy among cells). It is not included by default because I had to rerun everything. The "/ 20" is to approx rescale it to the version default version
     divDecay = cD.divInhibitor * parm("Division Inhibitor Decay Rate").toDouble();
-    cD.divInhibitor += (divBase - divDecay + divInduced) * Dt;
+    cD.divInhibitor += (divBase * cD.area - divDecay + divInduced ) * Dt;
+    //// END Crisanto's stuff
 
-
-
-    if(cD.selected) {
-        for(CCIndex f : *cD.cellFaces)
-          if(indexAttr[f].selected)
-              for(CCIndex ez : cs.incidentCells(f, 1)){
-                  Tissue::EdgeData& eD = edgeAttr[ez];
-                    cout << cD.label << endl;
-                    cout <<  "User Time: " << userTime <<  " PIN mem " << ez <<  " " << eD.Pin1[label] << " AUX1 mem " << ez <<  " " << eD.Aux1[label]  <<  endl;
-
-                }
+    // Find the highest LRC cell (used later for zonation, to see how far the cells are from the QC)
+    // ONLY WORKS IF the root grows from top to bottom, or change the code
+    // MIGHT MOVE IT SOMEWHERE ELSE TO SPEED UP!
+    double lrc = -BIG_VAL;
+    Point3d qc = Point3d(0,0,0);
+    Point3d source = Point3d(0,0,0); int source_cell = 0;
+    for(auto c : cellAttr) {
+        Tissue::CellData& cD = cellAttr[c.first];
+        if(cD.type == Tissue::LRC && cD.centroid.y() > lrc)
+            lrc = cD.centroid.y();
+        if(cD.type == Tissue::QC)
+            qc += cD.centroid;
+        if(cD.type == Tissue::Source) {
+            source += cD.centroid;
+            source_cell++;
+        }
     }
+    qc /= 2; source /= source_cell;
+
+
+    // Quasimodo
+    QString quasimodo_tissue = parm("Quasimodo Tissue");
+    double quasimodo_WT_prod_rate = parm("Quasimodo WT Production Rate").toDouble();
+    double quasimodo_tissue_prod_rate = parm("Quasimodo Tissue Production Rate").toDouble();
+    double quasimodo_decay_rate = parm("Quasimodo Decay Rate").toDouble();
+    if(quasimodo_WT_prod_rate > 0 && cD.type == Tissue::Epidermis){
+        cD.quasimodo += quasimodo_WT_prod_rate * 2 / (1 + exp(-0.04*((cD.centroid.y()-lrc) - 0))) * Dt;
+    }
+    if((quasimodo_tissue != "None") && (quasimodo_tissue != "All") && (quasimodo_tissue != "Meristem") &&
+            (quasimodo_tissue != "EpidermisCortex") &&
+            (quasimodo_tissue != "VascularMeristem") && (quasimodo_tissue != "VascularEZ") &&
+            (quasimodo_tissue != "EpidermisMeristem") && (quasimodo_tissue != "EpidermisEZ") &&
+            (quasimodo_tissue != "EpidermisCortexMeristem") && (quasimodo_tissue != "EpidermisCortexEZ") &&
+            (Tissue::stringToCellType(quasimodo_tissue) == cD.type)) {
+        cD.quasimodo += quasimodo_tissue_prod_rate * Dt;
+    } else if( quasimodo_tissue == "All" && (cD.type != Tissue::QC &&
+                                             cD.type != Tissue::VascularInitial && cD.type != Tissue::ColumellaInitial && cD.type != Tissue::EpLrcInitial && cD.type != Tissue::CEI && cD.type != Tissue::LRC) ){       if(cD.centroid.y() > lrc)
+            cD.quasimodo += quasimodo_tissue_prod_rate * Dt;
+    } else if( quasimodo_tissue == "EpidermisCortex" && (cD.type == Tissue::Epidermis || cD.type == Tissue::Cortex) ){
+            cD.quasimodo += quasimodo_tissue_prod_rate * Dt;
+    } else if( quasimodo_tissue == "Meristem" && cD.centroid.y()-qc.y() > 0 && cD.stage == 0){
+        cD.quasimodo += quasimodo_tissue_prod_rate * Dt;
+    } else if( quasimodo_tissue == "VascularMeristem" && cD.type == Tissue::Vascular && cD.stage == 0){
+        cD.quasimodo += quasimodo_tissue_prod_rate * Dt;
+    } else if( quasimodo_tissue == "VascularEZ" && cD.type == Tissue::Vascular && cD.stage == 1){
+        cD.quasimodo += quasimodo_tissue_prod_rate * Dt;
+    } else if( quasimodo_tissue == "EpidermisMeristem" && cD.type == Tissue::Epidermis && cD.stage == 0){
+        cD.quasimodo += quasimodo_tissue_prod_rate * Dt;
+    } else if( quasimodo_tissue == "EpidermisEZ" && cD.type == Tissue::Epidermis && cD.stage == 1){
+        cD.quasimodo += quasimodo_tissue_prod_rate * Dt;
+    } else if( quasimodo_tissue == "EpidermisCortexMeristem" && (cD.type == Tissue::Epidermis || cD.type == Tissue::Cortex) && cD.stage == 0){
+        cD.quasimodo += quasimodo_tissue_prod_rate * Dt;
+    } else if( quasimodo_tissue == "EpidermisCortexEZ" && (cD.type == Tissue::Epidermis || cD.type == Tissue::Cortex) && cD.stage == 1){
+        cD.quasimodo += quasimodo_tissue_prod_rate * Dt;
+    }
+    cD.quasimodo -= cD.quasimodo * quasimodo_decay_rate * Dt;
+
+    // WOX5
+    if(cD.type == Tissue::QC) {
+        double wox5_p = parm("WOX5 Basal Production Rate").toDouble();
+        double wox5_d = parm("WOX5 Decay Rate").toDouble();
+        double wox5_pa = parm("WOX5 Induction by Auxin").toDouble();
+        double wox5_da = parm("WOX5 Degradation by Auxin").toDouble();
+        double wox5_ta = parm("WOX5 Induction to Auxin").toDouble();
+        cD.wox5 += (  wox5_p
+                    + (wox5_pa / (1/pow(cD.auxin/cD.area, 2) + wox5_pa) * (-pow(wox5_da, 2) / (1/pow(cD.auxin/cD.area, 2) + pow(wox5_da, 2)) + 1))
+                    - cD.wox5 * wox5_d) * Dt;
+        if(cD.wox5 > 10) cD.wox5 = 10;
+        cD.auxin += cD.wox5 * wox5_ta * Dt;
+    }
+
+    // Brassinosteroids
+    double brassinosteroidDelay = parm("Brassinosteroid Delay").toDouble();
+    double brassinosteroidBasal = parm("Brassinosteroid Basal Production").toDouble();
+    double brassinosteroidInduced = parm("Brassinosteroid Induced Production").toDouble();
+    double brassinosteroidPermeability = parm("Brassinosteroid Permeability").toDouble();
+    double brassinosteroidDecay = parm("Brassinosteroid Decay").toDouble();
+    if(cD.brassinosteroidTarget == 1 && cD.lastDivision < brassinosteroidDelay) {
+        cD.brassinosteroidSignal +=  1 * Dt;
+        cD.brassinosteroidProd = 0;
+    }  else if (cD.brassinosteroidTarget == -1 && cD.lastDivision < brassinosteroidDelay){
+        cD.brassinosteroidSignal = 0;
+        cD.brassinosteroidProd +=  brassinosteroidInduced * Dt;
+    } else {
+        cD.brassinosteroidSignal +=  1 * Dt;
+        cD.brassinosteroidProd = 0;
+    }
+    if(cD.brassinosteroidSignal > 1)
+        cD.brassinosteroidSignal = 1;
+    if(brassinosteroidPermeability > 0) // avoid entering this loop if disabled
+        for(CCIndex vn : csDual.neighbors(cD.dualVertex)) {
+            int labeln = indexAttr[vn].label;
+            Tissue::CellData& cDn = cellAttr[labeln];
+            for(CCIndex e : tissueProcess->wallEdges[std::make_pair(label, labeln)]) {
+                Tissue::EdgeData& eD = edgeAttr[e];
+                double diffusion = 0.5 * brassinosteroidPermeability * eD.length * (cDn.brassinosteroids/cDn.area - cD.brassinosteroids/cD.area)  ;
+                cD.brassinosteroids += diffusion * Dt;
+                cDn.brassinosteroids -= diffusion * Dt;
+            }
+        }
+    cD.brassinosteroids += (brassinosteroidBasal + cD.brassinosteroidProd - brassinosteroidDecay * cD.brassinosteroids) * Dt;
+    if(cD.brassinosteroids > 1)
+        cD.brassinosteroids = 1;
+
 
     // Undefined are like dead cells
     if(cD.type == Tissue::Undefined) {
@@ -1152,7 +1363,6 @@ bool Chemicals::update() {
         double Kpinoid = parm("PINOID Impact Half-max").toDouble();
         double Kmf = parm("MF Impact Half-max").toDouble();
         double Kgeom = parm("Geometry Impact Half-max").toDouble();
-        double KpinSuppAuxin = parm("Pin1 Sensitivity Suppression by Auxin Amount").toDouble();
         double KPin1MF = parm("Pin1 Sensitivity MF K").toDouble();
         double KPin1auxinflux = parm("Pin1 Sensitivity Auxin-flux K").toDouble();
         double KPin1geom = parm("Pin1 Sensitivity Geometry K").toDouble();
@@ -1172,8 +1382,8 @@ bool Chemicals::update() {
                         if(norm(cD.auxinFluxVector) > 0)
                             auxinImpactValue =
                                 norm(cD.auxinFluxVector) * cD.auxinFluxVector/norm(cD.auxinFluxVector) * eD.outwardNormal[f] * eD.length;
-                        if(auxinImpactValue < 0 || cD.auxin/cD.area > kauxinMaxCell)
-                                if(parm("Pin1 Sensitivity Suppression by Auxin Max Cell") == "True")
+                        if(auxinImpactValue < 0 || (parm("Pin1 Sensitivity Suppression by Auxin Max Cell") == "True" && cD.auxin/cD.area > kauxinMaxCell))
+                                //if(parm("Pin1 Sensitivity Suppression by Auxin Max Cell") == "True") /////////////////////// MOVED BEFORE; IS IT CORRECT?
                                     auxinImpactValue = 0;
                         eD.auxinFluxImpact[label] =
                             (pow(auxinImpactValue, 4) / (pow(KauxinFlux, 4) + pow(auxinImpactValue, 4))) ;
@@ -1200,8 +1410,7 @@ bool Chemicals::update() {
                     // Calculate raw Pin sensitivity
                     eD.pin1SensitivityRaw[label] =
                               //eD.length *
-                              (pow(KpinSuppAuxin, 10) / (pow(cD.auxin/cD.area, 10) + pow(KpinSuppAuxin, 10)))
-                            *   (
+                               (
                                 (KPin1MF * eD.MFImpact[label])
                             +   (KPin1auxinflux * eD.auxinFluxImpact[label])
                             +   (KPin1geom * eD.geomImpact[label])
@@ -1249,6 +1458,8 @@ bool Chemicals::update() {
     }
 
     // update miscellaneous cell chemicals attributes
+    double qc_prodrate = parm("Auxin QC Basal Production Rate").toDouble();
+    double scn_prodrate = parm("Auxin SCN Basal Production Rate").toDouble();
     double avg_auxin_conc = 0; // needed for later debug print
     for(uint i = 0; i < cellAttr.size(); i++) {
         auto it = cellAttr.begin();
@@ -1256,11 +1467,13 @@ bool Chemicals::update() {
         Tissue::CellData& cD = it->second;
         cD.auxinDecayRate = parm("Auxin Decay Rate").toDouble();
         if(cD.type == Tissue::QC) {
-            cD.auxinProdRate = parm("Auxin QC Basal Production Rate").toDouble();
+            if(qc_prodrate >= 0)
+                cD.auxinProdRate = qc_prodrate;
             for(CCIndex vn : csDual.neighbors(cD.dualVertex)) {
                 int labeln = indexAttr[vn].label;
                 Tissue::CellData& cDn = cellAttr[labeln];
-                cDn.auxinProdRate = parm("Auxin SCN Basal Production Rate").toDouble();
+                if(scn_prodrate >= 0)
+                    cDn.auxinProdRate = scn_prodrate;
             }
         }
         if(cD.type == Tissue::Substrate)
@@ -1308,7 +1521,7 @@ bool Chemicals::update() {
         if(parm("Verbose") == "True")
             mdxInfo << "Chemical Time: " << userTime <<" Norm: " << normal << " Average Auxin Conc. :" << avg_auxin_conc << endl;
         debug_step = 0;
-    }  
+    }
 
     // Chemical convergence is ***only*** based on auxin flow
     if(normal <= convergeThresh) {
@@ -1409,7 +1622,7 @@ void Tissue::Subdivide::splitCellUpdate(Dimension dim,
                 }
             // What to do with PIN? For gradient it gets recalculated at every step.
 
-            // set them as daugheters for later
+            // set them as daughters for later
             CellData& pCD = (*cellAttr)[(*indexAttr)[ss.parent].label];
             pCD.daughters =
                 std::make_pair((*indexAttr)[ss.childP].label, (*indexAttr)[ss.childN].label);
@@ -1446,10 +1659,6 @@ MDXSubdivideX::MDXSubdivideX(Mesh &_mesh)
 {
   mesh = &_mesh;
   indexAttr = &mesh->indexAttr();
-
-  /*for(const QString &signal : mesh->signalAttrList())
-    attrVec.push_back(&mesh->signalAttr<double>(signal)); //this creates warnings
-    */
 }
 
 void MDXSubdivideX::splitCellUpdate(Dimension dim, const CCStructure &cs,
@@ -1517,11 +1726,8 @@ void Splitter::splitCellUpdate(Dimension dim,
 
 // Run a step of cell division
 bool RootDivide::step(double Dt) {
-    if(parm("Cell Division Enabled") == "True")
-        // Pass our subdivide
         return CellDivision::step(getMesh("Mesh 1"), &subdiv);
-    else
-        return false;
+
 }
 
 // copy here the modified MDXProcessCellDivide
@@ -1763,7 +1969,6 @@ bool findCellDiv2dX(const CCStructure &cs, const CCIndexDataAttr &indexAttr, CCI
 CCIndex getClosestAvailableCutPoint(CCIndex v, Point3d& closest, const CCStructure &cs, const CCIndexDataAttr &indexAttr, CCIndex cell, double CellWallMin, double CellWallSample) {
 
     closest = Point3d(BIG_VAL, 0, 0);
-    cout << "finding closest point to " << v << endl;
     Point3d v_pos = indexAttr[v].pos;
     CCStructure::CellTuple ct(cs,cell);
     CCIndex edge;
@@ -1784,16 +1989,16 @@ CCIndex getClosestAvailableCutPoint(CCIndex v, Point3d& closest, const CCStructu
         }
         ct.flip(0,1);
     } while(ct[0] != firstV);
-    cout << "it's " << closest << " in " << edge << endl;
     return edge;
 }
 
 // Divide a two-dimensional cell using to the given division parameters and algorithm.
-bool divideCell2dX(CCStructure &cs, CCIndexDataAttr &indexAttr, Tissue::VertexDataAttr &vMAttr, CCIndex cell,
+bool CellDivision::divideCell2dX(CCStructure &cs, CCIndexDataAttr &indexAttr, Tissue::VertexDataAttr &vMAttr, CCIndex cell,
                        const Cell2dDivideParms &divParms, Subdivide *sDiv,
-                   Cell2dDivideParms::DivAlg divAlg = Cell2dDivideParms::SHORTEST_WALL_THROUGH_CENTROID,
+                   Cell2dDivideParms::DivAlg divAl = Cell2dDivideParms::SHORTEST_WALL_THROUGH_CENTROID,
                    const Point3d &divVector = Point3d(1., 0., 0.), std::set<CCIndex> divisionPoints = std::set<CCIndex>(), double maxJoiningDistance = 1)
 {
+
 
   // Find out where the division will take place
   DivWall2d divWall;
@@ -1801,13 +2006,13 @@ bool divideCell2dX(CCStructure &cs, CCIndexDataAttr &indexAttr, Tissue::VertexDa
   CCIndex ep[2];
   //if(!findCellDiv2dX(cs, indexAttr, cell, divParms, divAlg, divVector, divWall))
   //  return false;
-  if(divAlg == Cell2dDivideParms::SHORTEST_WALL_THROUGH_CENTROID ) {
-      if(!findCellDiv2dX(cs, indexAttr, cell, divParms, divAlg, divVector, divWall))
+  if(divAl == Cell2dDivideParms::SHORTEST_WALL_THROUGH_CENTROID ) {
+      if(!findCellDiv2dX(cs, indexAttr, cell, divParms, divAl, divVector, divWall))
           return false;
-  } else if (divAlg == Cell2dDivideParms::ASSIGNED_VECTOR_TRHOUGH_CENTROID) {
-      if(!findCellDiv2dX(cs, indexAttr, cell, divParms, divAlg, divVector, divWall))
+  } else if (divAl == Cell2dDivideParms::ASSIGNED_VECTOR_TRHOUGH_CENTROID) {
+      if(!findCellDiv2dX(cs, indexAttr, cell, divParms, divAl, divVector, divWall))
           return false;
-  } else if     (divAlg == 2) {
+  } else if     (divAl == 2) {
       if(divisionPoints.empty())
           return(divideCell2dX(cs, indexAttr, vMAttr, cell, divParms, sDiv, Cell2dDivideParms::ASSIGNED_VECTOR_TRHOUGH_CENTROID, divVector));
       else {
@@ -1847,7 +2052,7 @@ bool divideCell2dX(CCStructure &cs, CCIndexDataAttr &indexAttr, Tissue::VertexDa
       throw(QString("divideCell2dX: Unknown division algorithm"));
 
   // Divide the cell walls
-  if(divAlg == Cell2dDivideParms::SHORTEST_WALL_THROUGH_CENTROID || divAlg == Cell2dDivideParms::ASSIGNED_VECTOR_TRHOUGH_CENTROID) {
+  if(divAl == Cell2dDivideParms::SHORTEST_WALL_THROUGH_CENTROID || divAl == Cell2dDivideParms::ASSIGNED_VECTOR_TRHOUGH_CENTROID) {
       for(int i = 0 ; i < 2 ; i++) {
         CCIndex edge = edgeBetween(cs, divWall.endpoints[i].vA, divWall.endpoints[i].vB);
 
@@ -1864,7 +2069,7 @@ bool divideCell2dX(CCStructure &cs, CCIndexDataAttr &indexAttr, Tissue::VertexDa
                                 neg ? divWall.endpoints[i].sfrac : (1.0 - divWall.endpoints[i].sfrac));
         }
       }
-  } else if(divAlg == 2) {
+  } else if(divAl == 2) {
       for(int i = 0 ; i < 2 ; i++) {
         if(!ep[i].isPseudocell()) continue;
 
@@ -1889,6 +2094,10 @@ bool divideCell2dX(CCStructure &cs, CCIndexDataAttr &indexAttr, Tissue::VertexDa
   CCStructure::SplitStruct ss(cell);
   CCIndexFactory.fillSplitStruct(ss);
   cs.splitCell(ss, +ep[0] -ep[1]);
+  if(parm("Split Division Plane") == "True") {
+    CCIndexVec edges; edges.push_back(ss.membrane);
+    splitEdges(cs, indexAttr, edges, sDiv);
+  }
 
   if(sDiv) {
     updateFaceGeometry(cs, indexAttr, ss.childP);
@@ -1923,25 +2132,34 @@ bool CellDivision::step(Mesh* mesh, Subdivide* subdiv) {
     double divisionProbHalfInhibitor = parm("Division half-probability by Inhibitor").toDouble();
     double divisionPromoterLevel = parm("Division Promoter Level").toDouble();
     bool divisionControl = parm("Division Control") == "True";
+    bool sabatiniControl = parm("Sabatini Control") == "True";
+    bool wox5Control = parm("WOX5 Control") == "True";
+    bool brControl = parm("Brassinosteroids Control") == "True";
+    QString brSignalling = parm("Brassinosteroids Signalling");
+    double divisionCoefficientRate = parm("Division Coefficient Rate").toDouble();
+    double minimumAreaPerc = parm("Minimum Area Percentage").toDouble();
+    double maximumAreaPerc = parm("Maximum Area Percentage").toDouble();
     bool ignoreCellType = parm("Ignore Cell Type") == "True";
 
     // find the QC so we can print the distance (for plotting)
-    Point3d  QCcm;
+    Point3d  QCcm; int QCcells = 0;
     for(auto c : cellAttr) {
         Tissue::CellData& cD = cellAttr[c.first];
-        if(cD.type == Tissue::QC)
+        if(cD.type == Tissue::QC) {
             QCcm += cD.centroid;
+            QCcells ++;
+        }
     }
-    QCcm /= 2;
+    QCcm /= QCcells;
     // check if there are any cells to divide (depending on are or other clues)
     std::vector<Tissue::CellData> cDs;
     bool trigger_division = false;
     for(auto c : cellAttr) {
         Tissue::CellData& cD = cellAttr[c.first];
-        cD.divProb = 0;
+        // Crisanto
         cD.divisionAllowed = false;
         cD.divProb = (2 / (1 + exp(-divisionProbHalfInhibitor * cD.divInhibitor*100/cD.area)) - 1) * divisionMaxTime + divisionMinTime;
-        if(divisionControl && rootProcess->userTime > 24) {
+        if(divisionControl && rootProcess->userTime > 24) { // rootProcess->userTime > 24 is to avoid early divisions
             if(cD.area/cD.cellMaxArea > divisionProbHalfSize)
                 if(norm(cD.centroid - QCcm) < divisionMeristemSize)
                     if(cD.divPromoter/cD.area > divisionPromoterLevel) {
@@ -1950,20 +2168,61 @@ bool CellDivision::step(Mesh* mesh, Subdivide* subdiv) {
                     }
         } else
             cD.divisionAllowed = true;
-
-        if((manualCellDivision && cD.selected) ||
+        // Sabatini
+        if(sabatiniControl) {
+            cD.divisionAllowed = false;
+            /*
+            if(cD.divProb == 0) {
+                int range = upperMaxTime - lowerMaxTime + 1;
+                cD.divProb = rand() % range + lowerMaxTime;
+            }
+            if(cD.lastDivision > cD.divProb)
+                cD.divisionAllowed = true;
+            */
+            double stiffness = 0;
+            for(CCIndex e : cD.perimeterEdges)
+                stiffness += edgeAttr[e].eStiffness;
+            stiffness /= cD.perimeterEdges.size();
+            cD.divProb = minimumAreaPerc*cD.cellMaxArea + (maximumAreaPerc*cD.cellMaxArea) / (1 + exp(divisionCoefficientRate * stiffness));
+            if(cD.area > cD.divProb)
+                cD.divisionAllowed = true;;
+        }
+        // WOX5
+        if(wox5Control && cD.type == Tissue::QC) {
+            cD.divisionAllowed = false;
+            if(cD.wox5 > 10)
+                mdxInfo << "WOX5 higher than 10: " << cD.wox5 << endl;
+            double f1 = 1 - (0.80 - 0.1) * exp(-2 * cD.wox5) - 0.05;
+            double f2 = (1 - (0.30 - 0.1) * exp(2 * (cD.wox5 - 10))) - 0.05;
+            cD.divProb = -((f1 + f2) - 2);
+            double r = ((double) rand() / (RAND_MAX));
+            /*
+            if(r < cD.divProb*0.01)
+                cD.divisionAllowed = true;
+            */
+            if(!cD.QCwox5Flag && cD.area > cD.cellMaxArea) {
+                if(r < cD.divProb) {
+                    cD.divisionAllowed = true;
+                    cD.QCwox5Flag = true;
+                } else {
+                    cD.divisionAllowed = false;
+                    cD.QCwox5Flag = true;
+                }
+            }
+        }
+        // Cell division
+        if(
+            cD.stage == 0 &&
+            ((manualCellDivision && cD.selected) ||
             (cD.divisionAllowed == true &&
              cD.area > cD.cellMaxArea &&
-             cD.lastDivision > 1)) {
+             cD.lastDivision > 1))
+          ) {
             if(Verbose) {
                 mdxInfo << "CellDivision.step: Cell division triggered by " << cD.label << " of size " << cD.area
                         << " of type " << Tissue::ToString(cD.type) << " at position " << cD.centroid << " distance from QC " << cD.centroid.y() - QCcm.y()
                         <<   " bigger than " << cD.cellMaxArea << " last division time: " << cD.lastDivision
-                        << " division inhibitor: " << cD.divInhibitor/cD.area  << " division promoter: " << cD.divPromoter/cD.area  << " division prob: " << cD.divProb  << endl;
-
-
-                //cout << random << " " << divProbAuxin << " " << divProbSize << " " << divProbInhibitor << " " << (divProbSize + divProbAuxin *divProbInhibitor* divProbSize)*0.5 << endl;
-                //cout << (random < RAND_MAX * (divProbSize + divProbAuxin * divProbSize * divProbInhibitor)*0.5 * Dt) << endl;
+                        << " division inhibitor: " << cD.divInhibitor/cD.area  << " division promoter: " << cD.divPromoter/cD.area  << " division prob: " << cD.divProb << " time: " << rootProcess->stepCount << endl;
 
             }
             // Skip division if division algoritm MF depending but cell has no polarity
@@ -1998,7 +2257,7 @@ bool CellDivision::step(Mesh* mesh, Subdivide* subdiv) {
         throw(QString("CellDivision.step: empty cells division set"));
 
     // divide the cells
-    std::map<int, std::pair<int, int>> daughters;        
+    std::map<int, std::pair<int, int>> daughters;
     forall(const CCIndex& f, D) {
         int label = indexAttr[f].label;
         Tissue::CellData& cD = cellAttr[label];
@@ -2054,9 +2313,50 @@ bool CellDivision::step(Mesh* mesh, Subdivide* subdiv) {
         maxAreas[(Tissue::CellType)fooInt] =
                 rootProcess->setGlobalAttrProcess->parm(QString(Tissue::ToString((Tissue::CellType)fooInt)) + " Max area").toInt();
     for(Tissue::CellData cD : cDs)
-        if(daughters[cD.label].first > 0 && daughters[cD.label].second > 0)
-            cD.division(cs, cellAttr, faceAttr, edgeAttr,
-                        cellAttr[daughters[cD.label].first], cellAttr[daughters[cD.label].second], maxAreas, ignoreCellType);
+        if(daughters[cD.label].first > 0 && daughters[cD.label].second > 0) {
+            Tissue::CellData &cD1 = cellAttr[daughters[cD.label].first];
+            Tissue::CellData &cD2 = cellAttr[daughters[cD.label].second];
+            cD.division(cs, indexAttr, cellAttr, faceAttr, edgeAttr, vMAttr,
+                        cD1, cD2, maxAreas, ignoreCellType);
+            // Brassinosteoroids after cell division
+            if(brControl) {
+                cD1.brassinosteroidMother = cD2.brassinosteroidMother = cD.label;
+                if(norm(cD1.centroid - QCcm) > norm(cD2.centroid - QCcm)) {
+                    cD1.brassinosteroidTop = true;
+                    cD2.brassinosteroidTop = false;
+                } else {
+                    cD1.brassinosteroidTop = false;
+                    cD2.brassinosteroidTop = true;
+                }
+                if       (brSignalling == "Upper") {
+                    if(norm(cD1.centroid - QCcm) > norm(cD2.centroid - QCcm)) {
+                        cD1.brassinosteroidTarget = 1;
+                        cD2.brassinosteroidTarget = -1;
+
+                    } else {
+                        cD1.brassinosteroidTarget = -1;
+                        cD2.brassinosteroidTarget = 1;
+                    }
+                } else if(brSignalling == "Lower") {
+                    if(norm(cD1.centroid - QCcm) < norm(cD2.centroid - QCcm)) {
+                        cD1.brassinosteroidTarget = 1;
+                        cD2.brassinosteroidTarget = -1;
+                    } else {
+                        cD1.brassinosteroidTarget = -1;
+                        cD2.brassinosteroidTarget = 1;
+                    }
+                } else if(brSignalling == "Both") {
+                    cD1.brassinosteroidTarget = 1;
+                    cD2.brassinosteroidTarget = 1;
+                } else if(brSignalling == "None") {
+                    cD1.brassinosteroidTarget = -1;
+                    cD2.brassinosteroidTarget = -1;
+                }
+            } else {
+                cD1.brassinosteroidTarget = 0;
+                cD2.brassinosteroidTarget = 0;
+            }
+        }
 
     // Update mesh points, edges, surfaces
     mesh->updateAll();
@@ -2077,8 +2377,6 @@ void write_debug_header(std::ofstream &output_file) {
                 << "QC position"
                 << ","
                 << "Average Pressure"
-                << ","
-                << "Average Sigma"
                 << ","
                 << "Average Cell Growth"
                 << ","
@@ -2151,6 +2449,8 @@ bool Root::initialize(QWidget* parent) {
         throw(QString("Root::initialize Cannot make SaveMesh") + parm("SaveMesh"));
     if(!getProcess(parm("Remesh"), remeshProcess))
         throw(QString("Root::initialize Cannot make Remesh") + parm("Remesh"));
+    if(!getProcess(parm("RemeshCell"), remeshCellProcess))
+        throw(QString("Root::initialize Cannot make Remesh Cell") + parm("RemeshCell"));
 
     debugging = parm("Debug") == "True";
     maxMechanicsIter =  parm("Max Mechanical Iterations").toInt();
@@ -2255,8 +2555,6 @@ bool Root::step() {
         throw(QString("Root::run Error, please tun the model on the Tissue Complex"));
     CCStructure& cs = mesh->ccStructure("Tissue");
     CCIndexDataAttr& indexAttr = mesh->indexAttr();
-    Tissue::VertexDataAttr& vMAttr =
-        mesh->attributes().attrMap<CCIndex, Tissue::VertexData>("VertexData");
     Tissue::EdgeDataAttr& edgeAttr =
         mesh->attributes().attrMap<CCIndex, Tissue::EdgeData>("EdgeData");
     Tissue::CellDataAttr& cellAttr = mesh->attributes().attrMap<int, Tissue::CellData>("CellData");
@@ -2275,10 +2573,14 @@ bool Root::step() {
     // Update the mechanicals
     int i = 0;
     do{
+        // Perform cell division
+        if(divisionEnabled)
+            //while(divideProcess->step(mechanicsProcess->Dt)); // multiple divisions on the same step, usually crashes
+            divideProcess->step(mechanicsProcess->Dt);
+        // Mechanics
         if(mechanicsEnabled)
             mechanicsProcessConverged= mechanicsProcess->step();
-        userTime += mechanicsProcess->Dt;
-        // Update the chemicals
+                // Update the chemicals
         if(chemicalsEnabled)
             for(int j = 0; j < maxChemicalIter; j++)
                 if(chemicalsProcess->update())
@@ -2286,32 +2588,19 @@ bool Root::step() {
         // Grow the tissue
         if(growthEnabled)
             mechanicalGrowthProcess->step(mechanicsProcess->Dt);
-        // Perform cell division
-        if(divisionEnabled)
-            //while(divideProcess->step(mechanicsProcess->Dt)); // multiple divisions on the same step, usually crashes
-            divideProcess->step(mechanicsProcess->Dt);
         // Reset attributes ?
         //setGlobalAttrProcess->step();
         // Update the tissue
         tissueProcess->step(mechanicsProcess->Dt);
-
+        userTime += mechanicsProcess->Dt;
         i++;
     } while(!mechanicsProcessConverged && i < maxMechanicsIter);
 
     // Execute tests
     executeTestProcess->step(stepCount);
 
-    // Find the center of QC
-    Point3d  QCcm;
-    for(auto c : cellAttr) {
-        Tissue::CellData& cD = cellAttr[c.first];
-        if(cD.type == Tissue::QC)
-            QCcm += cD.centroid;
-    }
-    QCcm /= 2;
-
     // Find the center of vascular initials or substrate
-    Point3d  VIcm, SUBcm;
+    Point3d  QCcm,VIcm, SUBcm;
     int VIcount = 0;
     int SUBcount = 0;
     for(auto c : cellAttr) {
@@ -2324,7 +2613,10 @@ bool Root::step() {
             SUBcm += cD.centroid;
             SUBcount++;
         }
+        if(cD.type == Tissue::QC)
+            QCcm += cD.centroid;
     }
+    QCcm /= 2;
     VIcm /= VIcount;
     SUBcm /= SUBcount;
 
@@ -2353,8 +2645,24 @@ bool Root::step() {
     }
 
     // Check whether we should remesh
-    if(parm("Remesh during execution") == "True")
-        remeshProcess->check();
+    double remeshAvg = parm("Remesh during execution").toDouble();
+    if(remeshAvg > 0){
+        //remeshProcess->check();
+        for(auto c : cellAttr) {
+            Tissue::CellData& cD = cellAttr[c.first];
+            cD.remeshTime += mechanicsProcess->Dt;
+            int minimum = remeshAvg / 2;
+            int range = remeshAvg - minimum + 1;
+            int num = rand() % range + minimum;
+            if(/*cD.area > cD.cellMaxArea &&*/ cD.remeshTime > num /* && cD.stage == 1*/) {
+                mdxInfo << "Remeshing Cell: " << cD.label << endl;
+                remeshCellProcess->step(cD.label);
+                cD.pressure = 0;
+                cD.remeshTime = 0;
+            }
+        }
+    }
+
 
     // Update the mesh
     if(stepCount % parm("Mesh Update Timer").toInt() == 0)
@@ -2364,12 +2672,16 @@ bool Root::step() {
     if(parm("Snapshots Timer").toInt() > 0 && stepCount % parm("Snapshots Timer").toInt()  == 0){
         mdxInfo << "Let's take a snapshot" << endl;
         std::set<QString> signals_set = {
-                                         "Chems: Division Inhibitor by Area",
-                                         "Chems: Division Promoter by Area",
-                                         "Chems: Division Probability",
-                                         "Division Count",
-                                         "Mechs: Growth Rate",
-                                         "Chems: Auxin By Area"
+                                        //"Chems: Brassinosteroids",
+                                        //"Chems: Brassinosteroid Signal",
+                                        "Chems: Growth Signal",
+                                        "Mechs: Growth Rate",
+                                        //"Chems: Auxin By Area",
+                                        "Mechs: Cell Stiffness",
+                                        "Chems: Quasimodo",
+                                        "Chems: Division Probability",
+                                        "Mechs: Edge Strain Rate"
+                                        //"Chems: WOX5"
                                         };
         for(QString signalName: signals_set) {
             mesh->updateProperties("Tissue");
@@ -2450,8 +2762,8 @@ bool Root::step() {
             }
             mesh->updateAll();
             QString fileName = QString::fromStdString(snapshotDir) + QString("Root-%1-%2.png").arg(signalName).arg(screenShotCount, 4, 10, QChar('0'));
-            takeSnapshot(fileName, 1, 645*4, 780*4, 10, true); // cluster?
-            //takeSnapshot(fileName, 1, 2490*2, 1310*2, 100, true); // lab PC
+            //takeSnapshot(fileName, 1, 645*4, 780*4, 10, true); // cluster?
+            takeSnapshot(fileName, 1, 0, 0, 100, true); // lab PC
             // restore unwanted visual forward
             if(signalName == QString("Chems: Auxin By Area") ||
                     signalName == QString("Chems: Division Promoter by Area") ||
@@ -2520,21 +2832,19 @@ bool Root::step() {
 
     // Debugs?
     if(debugging) {
+        /*
         double rootGR = 0;
         for(double gr : mechanicsProcess->growthRatesVector)
             rootGR += gr;
         rootGR /= mechanicsProcess->growthRatesVector.size();
 
         double avg_pressure = 0;
-        double avg_sigma = 0;
         for(CCIndex e : cs.edges()) {
             Tissue::EdgeData eD = edgeAttr[e];
             avg_pressure += norm(eD.pressureForce);
-            avg_sigma += norm(eD.sigmaForce);
 
         }
         avg_pressure *= 1. / cs.edges().size();
-        avg_sigma *= 1. / cs.edges().size();
 
 
         double avg_velocity = 0;
@@ -2592,7 +2902,7 @@ bool Root::step() {
         anisotropy_degree /= anisotropy_count;
 
         output_file << stepCount << "," << userTime << "," << mechanicsProcess->realTime  << ","
-                    << rootGR << "," << QCcm << "," << avg_pressure << "," << avg_sigma << ","
+                    << rootGR << "," << QCcm << "," << avg_pressure << ","
                     << avg_cell_growth << "," << avg_velocity << "," << avg_auxin << "," << std_auxin << ","
                     << avg_auxinInter << "," << avg_Pin1Cyt << "," << avg_Pin1Mem << "," << avg_Aux1Mem << ","
                     << chemicalsProcess->debugs["Average Auxin Diffusion"] << ","
@@ -2603,22 +2913,88 @@ bool Root::step() {
                     << endl
                     << flush;
 
-
-        // positions, auxin and growth rate (for plotting)                
+        */
+        // positions, auxin and growth rate (for plotting)
         /*
         for(auto c : cellAttr) {
             Tissue::CellData& cD = cellAttr[c.first];
+
             if(cD.type != Tissue::Source && cD.type != Tissue::Substrate && cD.type != Tissue::QC )
                 cerr <<  mechanicsProcess->userTime << "," << cD.type << "," << cD.centroid.y() - VIcm.y() << "," << cD.auxin/cD.area << "," << cD.growthRate << "," << norm(cD.a1) << "," <<  norm(cD.a2) << endl;
+
+        }        */
+
+        // Crisanto's data
+        ///////// ONLY WORKS IF the root grows from top to bottom, or change the code
+        double lrc = -BIG_VAL;
+        if(stepCount % 10 == 0 && debugging) {
+            // Root length
+            Point3d QCcm = Point3d(0,0,0); int qc_cell = 0;
+            Point3d SOURCEcm = Point3d(0,0,0); int source_cell = 0;
+            Point3d SUBSTRATEcm = Point3d(0,0,0); int substrate_cell = 0;
+            Point3d substrate_normal, source_normal;
+
+            for(auto c : cellAttr) {
+                Tissue::CellData& cD = cellAttr[c.first];
+                if(cD.type == Tissue::QC) {
+                    QCcm += cD.centroid;
+                    qc_cell++;
+                }
+                else if(cD.type == Tissue::Source) {
+                    SOURCEcm += cD.centroid;
+                    source_cell++;
+                    for(CCIndex e : cD.perimeterEdges) {
+                        Tissue::EdgeData& eD = edgeAttr[e];
+                        for(CCIndex fn : cs.incidentCells(e, 2)){
+                            Tissue::CellData& cDn = cellAttr[indexAttr[fn].label];
+                            if(cD.type != cDn.type)
+                                source_normal += eD.outwardNormal[fn];
+                        }
+                    }
+                }
+                else if(cD.type == Tissue::Substrate) {
+                    SUBSTRATEcm += cD.centroid;
+                    substrate_cell++;
+                    for(CCIndex e : cD.perimeterEdges) {
+                        Tissue::EdgeData& eD = edgeAttr[e];
+                        for(CCIndex fn : cs.incidentCells(e, 2)){
+                            Tissue::CellData& cDn = cellAttr[indexAttr[fn].label];
+                            if(cD.type != cDn.type)
+                                substrate_normal += eD.outwardNormal[fn];
+                        }
+                    }
+                }
+                else if(cD.type == Tissue::LRC && cD.centroid.y() > lrc)
+                    lrc = cD.centroid.y();
+
+                if(cD.lastDivision > 0 && cD.brassinosteroidMother > 0) {
+                    cerr << "Brassino" << "," << cD.type << "," << cD.brassinosteroidMother << ","  << cD.lastDivision << ","
+                         << cD.brassinosteroidTop << "," << cD.area << "," << cD.growthRate <<
+                         "," << cD.brassinosteroidSignal << "," << cD.auxin/cD.area << endl;
+                }
+            }
+            QCcm /= qc_cell; SOURCEcm /= source_cell;
+            double root_length = norm(SOURCEcm - QCcm) ;
+            double root_angle = angle(substrate_normal/substrate_normal.norm(), source_normal/source_normal.norm()) * (180. / M_PI);
+            //mdxInfo << "Root length " << root_length << " Meristem length " <<  lrc-QCcm.y()  << " Time " << stepCount << endl;
+            cout << "Steps: " << stepCount << " Angle: " << 180-root_angle << endl;
+            /*
+            for(auto c : cellAttr) {
+                Tissue::CellData& cD = cellAttr[c.first];
+                mdxInfo << "Crisanto: root length " << root_length << " meristem_length " <<  lrc-QCcm.y()  << " time " << stepCount << " label " << cD.label << " of size " << cD.area
+                    << " of type " << Tissue::ToString(cD.type) << " at position " << cD.centroid << " distance from QC " << cD.centroid.y() - QCcm.y()
+                    //<<   " bigger than " << cD.cellMaxArea << " last division time: " << cD.lastDivision
+                    //<< " division inhibitor: " << cD.divInhibitor/cD.area  << " division promoter: " << cD.divPromoter/cD.area  << " division prob: " << cD.divProb  << endl;
+                      << " growth rate " << cD.growthRate << endl;
+            }*/
         }
-        */
 
     }
 
     // Calculate FPS
     clock_t curr_clock = clock();
     double elapsed_secs = double(curr_clock - prev_clock) / CLOCKS_PER_SEC;
-    if(stepCount % 10 == 0)
+    if(stepCount % 10 == 0 && debugging)
         mdxInfo << "FPS: " << (stepCount - prevStepCount) / elapsed_secs << ", time in seconds: " <<  double(curr_clock - begin_clock) / CLOCKS_PER_SEC <<  ", steps: " << stepCount << " steps" << endl;
     prev_clock = curr_clock;
     prevStepCount = stepCount;
@@ -2628,7 +3004,8 @@ bool Root::step() {
             mdxInfo << "The execution reached the maximum amount of seconds set" << endl;
             saveMeshProcess->run(mesh, parm("Output Mesh"), false);
             exit(0);
-        }
+    }
+
 
     return true;
 }
@@ -2694,39 +3071,6 @@ bool ClearCells::clearCell_old(int label) {
     }
     if(bn.size() < 3)
         throw(QString("Root::ClearCells Error, not enough perimeter edges found for cell " + label));
-
-    /*
-
-    // order the vertices
-    std::vector<std::pair<Point3d, Point3d>> polygonSegs;
-    std::vector<CCIndex> vs_orig;
-    std::vector<CCIndex> vs_ordered;
-
-    // get the original edges
-    for(auto i : bn) {
-        std::pair<CCIndex, CCIndex> eb = cs.edgeBounds(i);
-        vs_orig.push_back(eb.first);
-        vs_orig.push_back(eb.second);
-        polygonSegs.push_back(make_pair(indexAttr[eb.first].pos, indexAttr[eb.second].pos));
-    }
-
-    // sort them
-    for(auto i : orderPolygonSegs(polygonSegs))
-        for(auto j : vs_orig)
-            if(i == indexAttr[j].pos) {
-                vs_ordered.push_back(j);
-                break;
-            }
-
-    // vertices must be ordered counter-clockwise for the face to be displayed
-    // in front of the viewer
-    Point3d cross_product = (indexAttr[vs_ordered[0]].pos - centroid)
-                                .cross(indexAttr[vs_ordered[1]].pos - centroid);
-    if(cross_product.z() < 0)
-        std::reverse(std::begin(vs_ordered), std::end(vs_ordered));
-    face_to_create = vs_ordered;
-
-    */
 
     // delete marked edges, faces and vertices
     for(auto i : to_delete_faces)
@@ -3206,18 +3550,18 @@ bool PrintCellAttr::step() {
                     << " max area: " << cD.cellMaxArea << " "
                     << " perimeter: " << cD.perimeter << " "
                     << " invmassVertices: " << cD.invmassVertices << " " << endl
-                    << " G: " << cD.G << " E: " << cD.E << " F: " << cD.F << " R: " << cD.R << " U: " << cD.U << " S: " << cD.S << " M: " << cD.M << " M0: " << cD.M0
+                    << " G: " << cD.G << " E: " << cD.E
                     << " gMax: " << cD.gMax
                     << " gMin: " << cD.gMin
                     << " restCm: " << cD.restCm << " "
                     << " invRestMat: " << cD.invRestMat << " "
                     << " restX0: ";
                     for(auto x : cD.restX0) mdxInfo << x << " ";
-                    mdxInfo << endl;
+                    mdxInfo << " shapeInit: " << cD.shapeInit << endl;
             mdxInfo << " a1: " << cD.a1 << " " << " a2: " << cD.a2 << " "
                     << " axisMin: " << cD.axisMin << " " << " axisMax: " << cD.axisMax << " " << " divVector " << cD.divVector << " MF reorientation: " << cD.mfRORate << endl
-                    << " periclinal division: " << cD.periclinalDivision <<  " division algorithm: " << cD.divAlg << " last division: " << cD.lastDivision << " division counts: " << cD.divisionCount << endl
-                    << " pressure: " << cD.pressure << " " << " pressureMax: " << cD.pressureMax << " " << " wallStress : " << cD.wallStress << endl;
+                    << " stage: " << cD.stage << " life time: " << cD.lifeTime << " periclinal division: " << cD.periclinalDivision <<  " division algorithm: " << cD.divAlg << " last division: " << cD.lastDivision << " division counts: " << cD.divisionCount << endl
+                    << " pressure: " << cD.pressure << " " << " pressureMax: " << cD.pressureMax << " walls max GR: " << cD.wallsMaxGR  << endl;
             mdxInfo << " strain rate on the edges: ";
                        for(auto e : cD.perimeterEdges) {
                            Tissue::EdgeData& eD = edgeAttr[e];
@@ -3226,13 +3570,14 @@ bool PrintCellAttr::step() {
             mdxInfo << endl;
             mdxInfo
                     << " auxin: " << cD.auxin << " " << " auxin by area: " << cD.auxin/cD.area << " "
-                    //<< " growth factor: " << cD.growthFactor << " " << " growth factor by area: " << cD.growthFactor/cD.area << " "
                     << " Aux1: " << cD.Aux1 << " "
                     << " Pin1: " << cD.Pin1 << " " << " Pin1 by area: " << cD.Pin1/cD.area << " "
+                    << " Quasimodo: " << cD.quasimodo << " " << " WOX5: " << cD.wox5 << " " << " QCwox5Flag: " << cD.QCwox5Flag << " Brassinosteroids: " << cD.brassinosteroids << " Brassinosteroid Signal: " << cD.brassinosteroidSignal << " " << " Growth Signal: " << cD.growthSignal << " "
                     << " Division Promoter: " << cD.divPromoter/cD.area << " " << " Division Inhibitor: " << cD.divInhibitor/cD.area << " "<< " Division Probability: " << cD.divProb << " "
                     << " PINOID: " << cD.PINOID << " "   << " PP2A: " << cD.PP2A << " "
                     << " pinProdRate: " << cD.pinProdRate << " " << " aux1ProdRate: " << cD.aux1ProdRate << " "<< " pinInducedRate: " << cD.pinInducedRate << " " << " aux1InducedRate: " << cD.aux1InducedRate << " "<< " aux1MaxEdge: " << cD.aux1MaxEdge << " "
                     << " auxinProdRate: " << cD.auxinProdRate << " " << " auxinFluxVector: " << cD.auxinFluxVector
+                    << " is_ccvTIR1tissue: " << cD.is_ccvTIR1tissue
                     << endl;
             for(auto p : cD.auxinFluxes)
                 mdxInfo << " auxinFlux with " << p.first << " : " << p.second << " ";
@@ -3240,14 +3585,10 @@ bool PrintCellAttr::step() {
             Tissue::FaceData fD = faceAttr[f];
             mdxInfo << "Face: " << f  << " type: " << Tissue::ToString(fD.type) << " center: " << cIdx.pos << " label " << cIdx.label  << " owner " << fD.owner
                     << endl
-                    //<< " orientation with TOP: " << cs.ro(CCIndex::TOP, f) << endl
                     << " area: " << fD.area << " restAreaFace: " << fD.restAreaFace << " invRestMat: " << fD.invRestMat << " restPos: " << fD.restPos[0] << " : " << fD.restPos[1] << " : " << fD.restPos[2]
                     << endl
-                    //<< " prev_centroid: " << fD.prev_centroid << endl
                     << " E: " << fD.E << " " << " F: " << fD.F << " " << " R: " << fD.R << " " << " G: " << fD.G << " " << " V: " << fD.V << endl
-                    //<< " F1: " << fD.F1 << " " << " F2: " << fD.F2 << endl
                     << " a1: " << fD.a1 << " " << " a2: " << fD.a2 << endl
-                    << " stress: " << fD.stress << " " << " sigmaA: " << fD.sigmaA << endl
                     << " (visuals)"
                     << " type : " << fD.type << " growthRate : " << fD.growthRate << " auxin : " << fD.auxin << " intercellularAuxin : " << fD.intercellularAuxin
                     << " Pin1Cyt : " << fD.Pin1Cyt << " Pin1Mem : " << fD.Pin1Mem
@@ -3259,7 +3600,7 @@ bool PrintCellAttr::step() {
                 mdxInfo << "Edge: " << e << " " << indexAttr[cs.edgeBounds(e).first].pos << " : "
                         << indexAttr[cs.edgeBounds(e).second].pos << " type: " << Tissue::ToString(eD.type)
                         << " length: " << eD.length << " prevLength: " << eD.prevLength
-                        << " restLength: " << eD.restLength ;
+                        << " restLength: " << eD.restLength << " update rate: " << eD.updateRate; ;
                 for(auto p : eD.outwardNormal)
                    mdxInfo << " outward normal to " << indexAttr[p.first].label << " : " << p.second;
                 mdxInfo << endl ;
@@ -3267,7 +3608,6 @@ bool PrintCellAttr::step() {
                         << " prev_strain: " << eD.prev_strain
                         << " strain: " << eD.strain << " strainRate: " << eD.strainRate
                         //<< " cellAxis: " << eD.cellAxis
-                        << " sigmaEv: " << eD.sigmaEv << " sigmaEe: " << eD.sigmaEe << " sigmaForce: " << eD.sigmaForce
                         << " pressureForce: " << eD.pressureForce  << endl;
                  mdxInfo  << " intercellularAuxin: " << eD.intercellularAuxin << endl;
                  for(auto p : eD.auxinRatio)
@@ -3320,19 +3660,14 @@ bool PrintCellAttr::step() {
                         << " norm velocity: " << norm(vD.velocity)
                         << " dampedVelocity: " << norm(vD.dampedVelocity)
                         << " forces: " << vD.forces.size();
-                Point3d pressure, sigmaAY, sigmaEv, sigmaEe, totalForce;
+                Point3d pressure,  totalForce;
                 for(auto m : vD.forces) {
                     mdxInfo << " , " << std::get<0>(m) << " " << std::get<1>(m) << " "
                             << std::get<2>(m);
                     totalForce += std::get<2>(m);
                     if(std::get<1>(m) == QString("pressure"))
                         pressure += std::get<2>(m);
-                    else if(std::get<1>(m) == QString("sigmaAY"))
-                        sigmaAY += std::get<2>(m);
-                    else if(std::get<1>(m) == QString("sigmaEv"))
-                        sigmaEv += std::get<2>(m);
-                    else if(std::get<1>(m) == QString("sigmaEe"))
-                        sigmaEe += std::get<2>(m);
+
                     else if(std::get<1>(m) == QString("substrate") ||
                             std::get<1>(m) == QString("damping") ||
                             std::get<1>(m) == QString("friction"))
@@ -3343,10 +3678,7 @@ bool PrintCellAttr::step() {
                 }
                 mdxInfo << endl;
                 mdxInfo << " Total Force: " << totalForce << endl
-                        << "  Pressure: " << pressure
-                        << "  sigmaAY: " << sigmaAY
-                        << "  sigmaEv: " << sigmaEv
-                        << "  sigmaEe: " << sigmaEe << endl;;
+                        << "  Pressure: " << pressure << endl;;
                 Point3d totalCorrection;
                 for(auto c : vD.corrections)
                     totalCorrection += c.second;
@@ -3359,11 +3691,30 @@ bool PrintCellAttr::step() {
         }
     }
     mdxInfo << "Total cells: " << cellAttr.size() << endl;
-    /*mdxInfo << "Cell set: " << endl;
+    // Root length
+    Point3d QCcm = Point3d(0,0,0); int qc_cell = 0;
+    Point3d SOURCEcm = Point3d(0,0,0); int source_cell = 0;
     for(auto c : cellAttr) {
         Tissue::CellData& cD = cellAttr[c.first];
-        mdxInfo << "Label: " << cD.label << " pos: " << cD.centroid << endl;
-    }*/
+        if(cD.type == Tissue::QC) {
+            QCcm += cD.centroid;
+            qc_cell++;
+        }
+        else if(cD.type == Tissue::Source) {
+            SOURCEcm += cD.centroid;
+            source_cell++;
+        }
+    }
+    QCcm /= qc_cell; SOURCEcm /= source_cell;
+    mdxInfo << "Distance from source to QC: " << norm(SOURCEcm - QCcm) << endl;
+    // Get meristem size in number of cells
+    int meristem_size = 0;
+    for(auto c : cellAttr) {
+        Tissue::CellData& cD = cellAttr[c.first];
+        if (cD.type == Tissue::Cortex && cD.stage == 0)
+            meristem_size ++;
+    }
+    mdxInfo << "Meristem size in cells: " << round(meristem_size / 2) << endl;
     return false;
 }
 
@@ -3382,7 +3733,7 @@ bool SetGlobalAttr::initialize(QWidget* parent) {
 bool SetGlobalAttr::step() {
     Mesh* mesh = getMesh("Mesh 1");
     if(!mesh or mesh->file().isEmpty())
-        throw(QString("SetCell::step No current mesh"));
+        throw(QString("SetGlobalAttr::step No current mesh"));
 
     CCStructure& cs = mesh->ccStructure("Tissue");
     Tissue::EdgeDataAttr& edgeAttr =
@@ -3400,7 +3751,7 @@ bool SetGlobalAttr::step() {
         QString str = Tissue::ToString(cD.type);
         if(parm(QString(str + " Turgor Pressure")).toDouble() >= 0)
             cD.pressureMax = parm(QString(str + " Turgor Pressure")).toDouble();
-        cD.growthFactor = parm(QString(str + " Growth Factor")).toDouble();
+        cD.wallsMaxGR = parm(QString(str + " Wall Max GR")).toDouble();
         if(parm(QString(str + " Max area")).toDouble() >= 0)
             cD.cellMaxArea = parm(QString(str + " Max area")).toDouble();
         else
@@ -3449,11 +3800,11 @@ bool SetGlobalAttr::step() {
 bool SetCellAttr::step() {
     Mesh* mesh = getMesh("Mesh 1");
     if(!mesh or mesh->file().isEmpty())
-        throw(QString("SetGlobalAttr::step No current mesh, cannot rewind"));
+        throw(QString("SetCellAttr::step No current mesh"));
 
     QString ccName = mesh->ccName();
     if(ccName.isEmpty())
-        throw(QString("SetGlobalAttr::step Error, no cell complex selected"));
+        throw(QString("SetCellAttr::step Error, no cell complex selected"));
 
     CCStructure& cs = mesh->ccStructure(ccName);
     CCIndexDataAttr& indexAttr = mesh->indexAttr();
@@ -3474,13 +3825,21 @@ bool SetCellAttr::step() {
                 cD.periclinalDivision = parm("Periclinal Division") == "True";
             cD.mfRORate = parm("MF reorientation rate").toDouble();
             QStringList list = parm("Microfibril 1").split(QRegExp(","));
-            cD.a1[0] = list[0].toDouble();
-            cD.a1[1] = list[1].toDouble();
-            cD.a1[2] = list[2].toDouble();
+            if(list[0].toDouble() != 0 && list[1].toDouble() != 0 && list[2].toDouble() != 0){
+                cD.a1[0] = list[0].toDouble();
+                cD.a1[1] = list[1].toDouble();
+                cD.a1[2] = list[2].toDouble();
+            } else {
+                mdxInfo << "SetCellAttr: Microfibril 1 values all zero, skipping";
+            }
             list = parm("Microfibril 2").split(QRegExp(","));
-            cD.a2[0] = list[0].toDouble();
-            cD.a2[1] = list[1].toDouble();
-            cD.a2[2] = list[2].toDouble();
+            if(list[0].toDouble() != 0 && list[1].toDouble() != 0 && list[2].toDouble() != 0){
+                cD.a2[0] = list[0].toDouble();
+                cD.a2[1] = list[1].toDouble();
+                cD.a2[2] = list[2].toDouble();
+            } else {
+                mdxInfo << "SetCellAttr: Microfibril 2 values all zero, skipping";
+            }
             double mass =  parm("Vertices Masses").toDouble();
             cD.invmassVertices = 1. / mass;
             for(CCIndex f : (*cD.cellFaces)) {
@@ -3542,10 +3901,12 @@ REGISTER_PROCESS(PrintCellAttr);
 REGISTER_PROCESS(HighlightCell);
 REGISTER_PROCESS(DeleteCell);
 REGISTER_PROCESS(ExecuteTest);
+REGISTER_PROCESS(RemeshCell);
 REGISTER_PROCESS(ClearCells);
 REGISTER_PROCESS(TriangulateFacesX);
 REGISTER_PROCESS(PrintVertexAttr);
 // REGISTER_PROCESS(SplitEdges);
+REGISTER_PROCESS(ResetTurgorPressure);
 REGISTER_PROCESS(AddFace);
 REGISTER_PROCESS(DeleteEdges);
 REGISTER_PROCESS(CreateEdge);
